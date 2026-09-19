@@ -43,6 +43,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .file-status strong { font-size: 12px; }
 .file-status small { margin-top: 5px; word-break: break-all; }
 .file-status .warning { color: #e1aa6e; }
+.file-status .alert { color: #ff7b72; display: block; margin-top: 0.25rem; }
+.file-status .alert code { font-family: var(--font-mono, monospace); }
 .notice { display: flex; flex-direction: column; gap: 5px; padding: 17px; border: 1px solid #536d38; border-radius: 8px; margin-top: 14px; background: #1d2a1a; font-size: 13px; }
 .notice span, .notice small { color: #aeb9a1; }
 .notice.error span { color: #e6aaa0; }

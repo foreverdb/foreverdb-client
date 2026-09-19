@@ -18,7 +18,23 @@ type ClientStatus = {
   custom: boolean;
   addon_version: string | null;
   addon_update: string | null;
+  saved_at: number | null;
+  running_since: number | null;
+  crash_at: number | null;
 };
+
+const UNSAVED_WARNING_HOURS = 2;
+
+function clock(unixSeconds: number) {
+  return new Date(unixSeconds * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Hours the running game has gone without writing its SavedVariables. */
+function unsavedHours(client: ClientStatus) {
+  if (client.running_since === null) return 0;
+  const since = Math.max(client.running_since, client.saved_at ?? 0);
+  return (Date.now() / 1000 - since) / 3600;
+}
 type AddonRelease = { version: string; name: string; notes: string; published_at: string; html_url: string; asset_name: string; asset_size: number };
 type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
@@ -247,6 +263,16 @@ function App() {
                 <strong>{client.file_has_data ? (client.from_backup ? "Sicherungskopie mit Daten bereit" : "Datei bereit") : client.file_exists ? "Noch keine neuen Daten seit dem letzten Upload" : "Noch keine Daten"}</strong>
                 <small>{client.file_path ?? "Kein Account-Verzeichnis gefunden"}</small>
                 {client.running && <small className="warning">WoW läuft – neue Daten kommen beim Ausloggen oder per /reload.</small>}
+                {client.running && unsavedHours(client) >= UNSAVED_WARNING_HOURS && (
+                  <small className="alert">
+                    Seit {Math.floor(unsavedHours(client))} h nichts gespeichert – ein Absturz würde alles seit dem letzten Speichern verlieren. Im Spiel <code>/fc save</code> eingeben.
+                  </small>
+                )}
+                {client.crash_at !== null && (
+                  <small className="alert">
+                    WoW ist um {clock(client.crash_at)} abgestürzt{client.saved_at !== null ? `, zuletzt gespeichert ${clock(client.saved_at)}` : ""} – die Daten dieser Sitzung wurden nicht mehr geschrieben.
+                  </small>
+                )}
               </div>
             </div>
           )}

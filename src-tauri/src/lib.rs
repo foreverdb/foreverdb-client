@@ -5,7 +5,7 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 mod addon;
@@ -65,6 +65,14 @@ struct ClientStatus {
     addon_version: Option<String>,
     /// Newest release version when it is newer than the installed addon (or none is installed).
     addon_update: Option<String>,
+    /// Unix time the SavedVariables file was last written (WoW writes it only on logout,
+    /// exit or /reload).
+    saved_at: Option<u64>,
+    /// Unix time the running game process was started, when it is running.
+    running_since: Option<u64>,
+    /// Unix time of the newest crash dump in the client's Errors folder that is younger than
+    /// the last save: the session that crashed never wrote its data.
+    crash_at: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -377,13 +385,19 @@ fn saved_variables_path(client_dir: &Path) -> Option<PathBuf> {
 /// from the process name and from the first command-line argument.
 #[cfg(target_os = "linux")]
 fn wow_is_running(process_name: &str) -> bool {
+    wow_process_started(process_name).is_some()
+}
+
+/// Start time of the running game process (the /proc entry's creation), if any.
+#[cfg(target_os = "linux")]
+fn wow_process_started(process_name: &str) -> Option<SystemTime> {
     fs::read_dir("/proc")
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
         .filter(|name| name.chars().all(|character| character.is_ascii_digit()))
-        .any(|pid| {
+        .find(|pid| {
             let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
             if comm.trim().eq_ignore_ascii_case(process_name) {
                 return true;
@@ -391,6 +405,11 @@ fn wow_is_running(process_name: &str) -> bool {
             let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
             let argv0 = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
             executable_name(&String::from_utf8_lossy(argv0)).eq_ignore_ascii_case(process_name)
+        })
+        .map(|pid| {
+            fs::metadata(format!("/proc/{pid}"))
+                .and_then(|meta| meta.modified())
+                .unwrap_or_else(|_| SystemTime::now())
         })
 }
 
@@ -402,6 +421,33 @@ fn executable_name(path: &str) -> &str {
 #[cfg(not(target_os = "linux"))]
 fn wow_is_running(_process_name: &str) -> bool {
     false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wow_process_started(_process_name: &str) -> Option<SystemTime> {
+    None
+}
+
+fn unix_seconds(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+fn modified_at(path: &Path) -> Option<u64> {
+    fs::metadata(path).and_then(|meta| meta.modified()).ok().and_then(unix_seconds)
+}
+
+/// Newest crash dump (`Errors/*.txt`, written by the game's error handler) younger than
+/// `since`. A crash ends the session without writing SavedVariables.
+fn crash_after(client_dir: &Path, since: Option<u64>) -> Option<u64> {
+    fs::read_dir(client_dir.join("Errors"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+        .filter_map(|path| modified_at(&path))
+        .filter(|at| since.is_none_or(|saved| *at > saved))
+        .max()
 }
 
 /// Whether a SavedVariables file holds at least one catalog. Right after an upload the
@@ -478,6 +524,11 @@ fn client_status(
     let addon_update = release
         .filter(|release| addon::is_newer(&release.version, addon_version.as_deref()))
         .map(|release| release.version.clone());
+    let saved_at = main_path
+        .as_ref()
+        .and_then(|path| modified_at(path))
+        .or_else(|| main_path.as_ref().and_then(|path| modified_at(&backup_path(path))));
+    let running_since = wow_process_started(&def.process).and_then(unix_seconds);
     ClientStatus {
         id: def.id.clone(),
         label: def.label.clone(),
@@ -490,10 +541,13 @@ fn client_status(
             .map(|source| source.path)
             .or(main_path)
             .map(|path| path.to_string_lossy().into_owned()),
-        running: wow_is_running(&def.process),
+        running: running_since.is_some(),
         custom,
         addon_version,
         addon_update,
+        saved_at,
+        running_since,
+        crash_at: crash_after(client_dir, saved_at),
     }
 }
 
