@@ -46,6 +46,9 @@ type LogEntry = Activity & { at: string; id: number };
 
 const REFRESH_INTERVAL_MS = 5000;
 const LOG_LIMIT = 8;
+// Sequence for log entries; module-level so re-subscribing the event listener (React strict
+// mode, dependency changes) never restarts it and keys stay unique and monotonic.
+let logSequence = 0;
 
 function timestamp() {
   return new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -121,16 +124,19 @@ function App() {
 
   // The Rust watcher reports what it does (game closed, upload started, result).
   useEffect(() => {
-    let counter = 0;
+    let active = true;
     const unlisten = listen<Activity>("activity", (event) => {
-      counter += 1;
-      const entry: LogEntry = { ...event.payload, at: timestamp(), id: counter };
-      setLog((entries) => [entry, ...entries].slice(0, LOG_LIMIT));
+      if (!active) return; // a listener whose effect was already cleaned up
+      logSequence += 1;
+      const entry: LogEntry = { ...event.payload, at: timestamp(), id: logSequence };
+      // newest first, ordered by sequence no matter in which order events are delivered
+      setLog((entries) => [entry, ...entries].sort((a, b) => b.id - a.id).slice(0, LOG_LIMIT));
       if (event.payload.result) setResult(event.payload.result);
       if (event.payload.kind === "update") void checkRelease(false);
       void refresh();
     });
     return () => {
+      active = false;
       void unlisten.then((stop) => stop());
     };
   }, [refresh, checkRelease]);
