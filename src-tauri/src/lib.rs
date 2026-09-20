@@ -117,6 +117,10 @@ struct Settings {
     /// be removed (game still running) is not sent twice.
     #[serde(default)]
     last_uploaded: HashMap<String, u64>,
+    /// Per client, the Unix time of the last successful upload. The upload removes the
+    /// SavedVariables file, so this stands in for its timestamp when judging crash dumps.
+    #[serde(default)]
+    last_upload_at: HashMap<String, u64>,
     /// GitHub token for the private addon repository (fallback after the environment
     /// and the value compiled in at build time). Never handed to the window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -690,6 +694,7 @@ fn snapshot_source(client_dir: &Path) -> Option<SnapshotSource> {
 }
 
 fn client_status(
+    settings: &Settings,
     def: &ClientDef,
     version: Option<String>,
     custom: bool,
@@ -711,6 +716,9 @@ fn client_status(
                 .and_then(|path| modified_at(&backup_path(path)))
         });
     let running_since = wow_process_started(&def.process).and_then(unix_seconds);
+    // A crash only matters if it is younger than the last time the data was secured:
+    // written by the game, or uploaded (which removes the file and its timestamp).
+    let secured_at = saved_at.max(settings.last_upload_at.get(&def.id).copied());
     ClientStatus {
         id: def.id.clone(),
         label: def.label.clone(),
@@ -729,7 +737,7 @@ fn client_status(
         addon_update,
         saved_at,
         running_since,
-        crash_at: crash_after(client_dir, saved_at),
+        crash_at: crash_after(client_dir, secured_at),
     }
 }
 
@@ -771,6 +779,7 @@ fn clients_among(
             };
             if seen.insert(def.id.clone()) {
                 clients.push(client_status(
+                    settings,
                     &def,
                     Some(version),
                     added_installation,
@@ -788,7 +797,7 @@ fn clients_among(
         };
         let version = client_version(&def);
         seen.insert(def.id.clone());
-        clients.push(client_status(&def, version, true, release));
+        clients.push(client_status(settings, &def, version, true, release));
     }
     (wow_dirs, searched, clients)
 }
@@ -989,6 +998,11 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
         settings
             .last_uploaded
             .insert(client_id.to_string(), content_hash);
+        if let Some(now) = unix_seconds(std::time::SystemTime::now()) {
+            settings
+                .last_upload_at
+                .insert(client_id.to_string(), now);
+        }
     });
     archive_snapshot(
         &state.archive_dir,
