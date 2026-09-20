@@ -200,8 +200,13 @@ impl AppState {
         if let Some(parent) = self.settings_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        // Written to a temporary file first so a crash mid-write never leaves an
+        // empty settings.json behind.
         if let Ok(content) = serde_json::to_string_pretty(&*settings) {
-            let _ = fs::write(&self.settings_path, content);
+            let temp = self.settings_path.with_extension("json.tmp");
+            if fs::write(&temp, content).is_ok() {
+                let _ = fs::rename(&temp, &self.settings_path);
+            }
         }
         settings.clone()
     }
@@ -226,6 +231,15 @@ fn candidate_wow_dirs(settings: &Settings) -> Vec<PathBuf> {
         candidates.push(PathBuf::from(explicit));
     }
     candidates.extend(settings.extra_installations.iter().map(PathBuf::from));
+    candidates.extend(system_wow_dirs());
+    candidates
+}
+
+/// Where the launcher installs on this platform: Wine prefixes (Faugus, Lutris,
+/// plain Wine, Bottles) and the macOS default.
+#[cfg(not(target_os = "windows"))]
+fn system_wow_dirs() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
     let program_files = "drive_c/Program Files (x86)/World of Warcraft";
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         for prefix in [
@@ -254,6 +268,105 @@ fn candidate_wow_dirs(settings: &Settings) -> Vec<PathBuf> {
     candidates
 }
 
+/// Where the launcher installs on Windows: the registry entries Battle.net writes,
+/// the Program Files folders, and the usual spots on every fixed drive.
+#[cfg(target_os = "windows")]
+fn system_wow_dirs() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for value in registry_install_paths() {
+        candidates.extend(install_path_candidates(&value));
+    }
+    for var in ["ProgramFiles(x86)", "ProgramW6432", "ProgramFiles"] {
+        if let Some(root) = std::env::var_os(var) {
+            candidates.push(PathBuf::from(root).join("World of Warcraft"));
+        }
+    }
+    for drive in fixed_drives() {
+        for sub in [
+            "World of Warcraft",
+            "Games\\World of Warcraft",
+            "Program Files (x86)\\World of Warcraft",
+            "Blizzard\\World of Warcraft",
+        ] {
+            candidates.push(drive.join(sub));
+        }
+    }
+    candidates
+}
+
+/// InstallPath values Battle.net writes to HKLM (32-bit view). The value may name the
+/// installation or a flavour folder inside it, and the subkeys vary between launcher
+/// versions, so every value found is offered and `is_wow_dir` decides.
+#[cfg(target_os = "windows")]
+fn registry_install_paths() -> Vec<String> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY};
+    use winreg::RegKey;
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let flags = KEY_READ | KEY_WOW64_32KEY;
+    let mut paths = Vec::new();
+    if let Ok(key) =
+        hklm.open_subkey_with_flags(r"SOFTWARE\Blizzard Entertainment\World of Warcraft", flags)
+    {
+        paths.extend(key.get_value::<String, _>("InstallPath"));
+        for name in key.enum_keys().flatten() {
+            if let Ok(sub) = key.open_subkey_with_flags(&name, flags) {
+                paths.extend(sub.get_value::<String, _>("InstallPath"));
+            }
+        }
+    }
+    if let Ok(key) = hklm.open_subkey_with_flags(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\World of Warcraft",
+        flags,
+    ) {
+        paths.extend(key.get_value::<String, _>("InstallLocation"));
+    }
+    paths
+}
+
+/// A registry value and its parent, so both "…\World of Warcraft" and
+/// "…\World of Warcraft\_retail_\" lead to the installation.
+#[cfg(target_os = "windows")]
+fn install_path_candidates(value: &str) -> Vec<PathBuf> {
+    let path = PathBuf::from(value.trim().trim_end_matches(['\\', '/']));
+    let mut candidates = vec![path.clone()];
+    candidates.extend(path.parent().map(Path::to_path_buf));
+    candidates
+}
+
+/// Roots of the local fixed drives ("C:\", "D:\"); removable, optical and network
+/// drives are skipped because probing them can block.
+#[cfg(target_os = "windows")]
+fn fixed_drives() -> Vec<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
+    // SAFETY: plain Win32 queries; the root path is NUL-terminated.
+    let mask = unsafe { GetLogicalDrives() };
+    (b'C'..=b'Z')
+        .filter(|letter| mask & (1u32 << (letter - b'A')) != 0)
+        .map(|letter| format!("{}:\\", letter as char))
+        .filter(|root| {
+            let wide: Vec<u16> = root.encode_utf16().chain([0]).collect();
+            let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+            kind == DRIVE_FIXED
+        })
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// The form a directory is identified by. On Windows the on-disk spelling with
+/// backslashes and no "\\?\" prefix, so a probed "C:/…" and a picked "C:\…" (or an
+/// 8.3 short name) are the same client; elsewhere the path as given.
+pub(crate) fn normalize_dir(dir: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dir.to_path_buf()
+    }
+}
+
 fn is_wow_dir(dir: &Path) -> bool {
     dir.join(".build.info").is_file()
 }
@@ -262,8 +375,12 @@ fn is_wow_dir(dir: &Path) -> bool {
 fn find_wow_dirs(candidates: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for dir in candidates {
-        if is_wow_dir(dir) && !found.contains(dir) {
-            found.push(dir.clone());
+        if !is_wow_dir(dir) {
+            continue;
+        }
+        let dir = normalize_dir(dir);
+        if !found.contains(&dir) {
+            found.push(dir);
         }
     }
     found
@@ -334,7 +451,7 @@ fn client_from_dir(dir: &Path) -> Option<ClientDef> {
     let product = read_flavor(dir)?;
     let process = find_game_executable(dir)?;
     Some(ClientDef {
-        id: dir.to_string_lossy().into_owned(),
+        id: normalize_dir(dir).to_string_lossy().into_owned(),
         label: product_label(&product),
         product,
         process,
@@ -361,7 +478,7 @@ fn flavour_dirs(wow_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn saved_variables_path(client_dir: &Path) -> Option<PathBuf> {
-    let account_root = client_dir.join("WTF/Account");
+    let account_root = client_dir.join("WTF").join("Account");
     let mut accounts: Vec<PathBuf> = fs::read_dir(&account_root)
         .ok()?
         .filter_map(Result::ok)
@@ -377,18 +494,17 @@ fn saved_variables_path(client_dir: &Path) -> Option<PathBuf> {
     accounts
         .into_iter()
         .next()
-        .map(|account| account.join("SavedVariables/ForeverCollect.lua"))
+        .map(|account| account.join("SavedVariables").join("ForeverCollect.lua"))
 }
 
 /// True when a process whose executable name is `process_name` runs. Only the
-/// executable's file name is compared ("WowB.exe" must not match "Wow.exe"), taken
-/// from the process name and from the first command-line argument.
-#[cfg(target_os = "linux")]
+/// executable's file name is compared ("WowB.exe" must not match "Wow.exe").
 fn wow_is_running(process_name: &str) -> bool {
     wow_process_started(process_name).is_some()
 }
 
-/// Start time of the running game process (the /proc entry's creation), if any.
+/// Start time of the running game process (the /proc entry's creation), if any. The
+/// name is taken from the process name and from the first command-line argument.
 #[cfg(target_os = "linux")]
 fn wow_process_started(process_name: &str) -> Option<SystemTime> {
     fs::read_dir("/proc")
@@ -413,19 +529,78 @@ fn wow_process_started(process_name: &str) -> Option<SystemTime> {
         })
 }
 
+/// Start time of the running game process from a ToolHelp32 snapshot, if any. The
+/// creation time needs a query handle, which any process of the same user grants.
+#[cfg(target_os = "windows")]
+fn wow_process_started(process_name: &str) -> Option<SystemTime> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: plain Win32 calls; the entry is zeroed with dwSize set, every handle is closed.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut pid = None;
+        let mut more = Process32FirstW(snapshot, &mut entry);
+        while more != 0 {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            if executable_name(&name).eq_ignore_ascii_case(process_name) {
+                pid = Some(entry.th32ProcessID);
+                break;
+            }
+            more = Process32NextW(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+        let pid = pid?;
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return Some(SystemTime::now());
+        }
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let ok = GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user);
+        CloseHandle(process);
+        Some(if ok != 0 {
+            filetime_to_system_time(created.dwLowDateTime, created.dwHighDateTime)
+        } else {
+            SystemTime::now()
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn wow_process_started(_process_name: &str) -> Option<SystemTime> {
+    None
+}
+
+/// Windows FILETIME (100 ns ticks since 1601-01-01) as a SystemTime.
+#[cfg(any(target_os = "windows", test))]
+fn filetime_to_system_time(low: u32, high: u32) -> SystemTime {
+    const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    let ticks = ((high as u64) << 32) | low as u64;
+    UNIX_EPOCH + Duration::from_nanos(ticks.saturating_sub(UNIX_EPOCH_TICKS) * 100)
+}
+
 /// File name of a Windows or Unix path ("C:\\Games\\WowB.exe" -> "WowB.exe").
 fn executable_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path).trim()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn wow_is_running(_process_name: &str) -> bool {
-    false
-}
-
-#[cfg(not(target_os = "linux"))]
-fn wow_process_started(_process_name: &str) -> Option<SystemTime> {
-    None
 }
 
 fn unix_seconds(time: SystemTime) -> Option<u64> {
@@ -433,7 +608,10 @@ fn unix_seconds(time: SystemTime) -> Option<u64> {
 }
 
 fn modified_at(path: &Path) -> Option<u64> {
-    fs::metadata(path).and_then(|meta| meta.modified()).ok().and_then(unix_seconds)
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(unix_seconds)
 }
 
 /// Newest crash dump (`Errors/*.txt`, written by the game's error handler) younger than
@@ -527,7 +705,11 @@ fn client_status(
     let saved_at = main_path
         .as_ref()
         .and_then(|path| modified_at(path))
-        .or_else(|| main_path.as_ref().and_then(|path| modified_at(&backup_path(path))));
+        .or_else(|| {
+            main_path
+                .as_ref()
+                .and_then(|path| modified_at(&backup_path(path)))
+        });
     let running_since = wow_process_started(&def.process).and_then(unix_seconds);
     ClientStatus {
         id: def.id.clone(),
@@ -557,7 +739,15 @@ fn active_clients(
     settings: &Settings,
     release: Option<&AddonRelease>,
 ) -> (Vec<PathBuf>, Vec<String>, Vec<ClientStatus>) {
-    let candidates = candidate_wow_dirs(settings);
+    clients_among(settings, candidate_wow_dirs(settings), release)
+}
+
+/// `active_clients` restricted to the given candidate directories.
+fn clients_among(
+    settings: &Settings,
+    candidates: Vec<PathBuf>,
+    release: Option<&AddonRelease>,
+) -> (Vec<PathBuf>, Vec<String>, Vec<ClientStatus>) {
     let searched = candidates
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -659,12 +849,12 @@ fn list_client_candidates(state: tauri::State<'_, AppState>) -> Vec<ClientCandid
 /// Registers a folder chosen by the user: a flavour folder becomes an extra client, a
 /// WoW installation folder ("World of Warcraft", holding .build.info or flavour
 /// folders) an extra installation whose installed clients are active from then on.
-fn register_folder(settings: &mut Settings, path: &Path) -> Result<(), String> {
+fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, String> {
     if let Some(def) = client_from_dir(path) {
         if !settings.extra_clients.contains(&def.id) {
-            settings.extra_clients.push(def.id);
+            settings.extra_clients.push(def.id.clone());
         }
-        return Ok(());
+        return Ok(def.id);
     }
     let flavours: Vec<PathBuf> = flavour_dirs(path)
         .into_iter()
@@ -676,54 +866,66 @@ fn register_folder(settings: &mut Settings, path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    let root = path.to_string_lossy().into_owned();
+    let root = normalize_dir(path).to_string_lossy().into_owned();
     if !settings.extra_installations.contains(&root) {
-        settings.extra_installations.push(root);
+        settings.extra_installations.push(root.clone());
     }
     // Without a launcher file nothing counts as installed, so activate the flavours themselves.
     if !is_wow_dir(path) {
-        for dir in &flavours {
-            let id = dir.to_string_lossy().into_owned();
-            if !settings.extra_clients.contains(&id) {
-                settings.extra_clients.push(id);
+        for def in flavours.iter().filter_map(|dir| client_from_dir(dir)) {
+            if !settings.extra_clients.contains(&def.id) {
+                settings.extra_clients.push(def.id);
             }
         }
     }
-    Ok(())
+    Ok(root)
+}
+
+/// What `add_client` registered: the folder's identity (which may differ in spelling
+/// from what the dialog returned) and the settings as the window may see them.
+#[derive(Serialize)]
+struct AddedFolder {
+    id: String,
+    settings: SettingsView,
 }
 
 #[tauri::command]
-fn add_client(state: tauri::State<'_, AppState>, dir: String) -> Result<Settings, String> {
+fn add_client(state: tauri::State<'_, AppState>, dir: String) -> Result<AddedFolder, String> {
     let path = PathBuf::from(dir.trim_end_matches(['/', '\\']));
-    let mut outcome = Ok(());
+    let mut outcome = Err(String::new());
     let settings = state.update(|settings| outcome = register_folder(settings, &path));
-    outcome.map(|_| settings)
+    outcome.map(|id| AddedFolder {
+        id,
+        settings: settings.view(),
+    })
 }
 
 /// Removes an added client; when it was the last client of an added installation the
 /// installation is dropped as well, and an installed client of an added installation
 /// removes that installation.
 #[tauri::command]
-fn remove_client(state: tauri::State<'_, AppState>, id: String) -> Settings {
+fn remove_client(state: tauri::State<'_, AppState>, id: String) -> SettingsView {
     let parent = Path::new(&id)
         .parent()
         .map(|dir| dir.to_string_lossy().into_owned());
-    state.update(|settings| {
-        settings.extra_clients.retain(|entry| entry != &id);
-        if let Some(parent) = parent {
-            let siblings_left = settings.extra_clients.iter().any(|entry| {
-                Path::new(entry)
-                    .parent()
-                    .map(|dir| dir.to_string_lossy().into_owned())
-                    == Some(parent.clone())
-            });
-            if !siblings_left {
-                settings
-                    .extra_installations
-                    .retain(|entry| entry != &parent);
+    state
+        .update(|settings| {
+            settings.extra_clients.retain(|entry| entry != &id);
+            if let Some(parent) = parent {
+                let siblings_left = settings.extra_clients.iter().any(|entry| {
+                    Path::new(entry)
+                        .parent()
+                        .map(|dir| dir.to_string_lossy().into_owned())
+                        == Some(parent.clone())
+                });
+                if !siblings_left {
+                    settings
+                        .extra_installations
+                        .retain(|entry| entry != &parent);
+                }
             }
-        }
-    })
+        })
+        .view()
 }
 
 fn client_by_id(settings: &Settings, id: &str) -> Result<ClientDef, String> {
@@ -743,7 +945,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let main_path = saved_variables_path(client_dir).ok_or_else(|| {
         format!(
             "Kein Account-Verzeichnis unter '{}' gefunden.",
-            client_dir.join("WTF/Account").display()
+            client_dir.join("WTF").join("Account").display()
         )
     })?;
     let source = snapshot_source(client_dir).ok_or_else(|| {
@@ -1116,7 +1318,7 @@ mod tests {
             std::env::temp_dir().join(format!("foreverdb-client-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        normalize_dir(&dir)
     }
 
     #[test]
@@ -1230,10 +1432,10 @@ mod tests {
         )
         .unwrap();
         let mut settings = Settings::default();
-        register_folder(&mut settings, &root).unwrap();
+        let id = register_folder(&mut settings, &root).unwrap();
+        assert_eq!(id, root.to_string_lossy());
         assert!(settings.extra_clients.is_empty());
-        std::env::set_var("HOME", root.join("nohome"));
-        let (dirs, _, clients) = active_clients(&settings, None);
+        let (dirs, _, clients) = clients_among(&settings, vec![root.clone()], None);
         assert_eq!(dirs, vec![root.clone()]);
         assert_eq!(
             clients.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
@@ -1274,7 +1476,11 @@ mod tests {
     #[test]
     fn snapshot_source_falls_back_to_backup() {
         let root = temp_dir("snapshot-source");
-        let dir = root.join("WTF/Account/1234#1/SavedVariables");
+        let dir = root
+            .join("WTF")
+            .join("Account")
+            .join("1234#1")
+            .join("SavedVariables");
         fs::create_dir_all(&dir).unwrap();
         let main = dir.join("ForeverCollect.lua");
         let backup = dir.join("ForeverCollect.lua.bak");
@@ -1297,6 +1503,46 @@ mod tests {
             "current file wins when it has data"
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn finds_the_current_process() {
+        let exe = std::env::current_exe().unwrap();
+        let name = exe.file_name().unwrap().to_str().unwrap();
+        assert!(wow_is_running(name), "the test binary itself runs: {name}");
+        let started = wow_process_started(name).unwrap();
+        let now = SystemTime::now();
+        assert!(
+            started <= now + Duration::from_secs(1),
+            "start time in the future"
+        );
+        assert!(
+            started >= now - Duration::from_secs(60 * 60),
+            "start time too old"
+        );
+        assert!(!wow_is_running("not-running-4711.exe"));
+    }
+
+    #[test]
+    fn converts_filetime_to_unix_time() {
+        assert_eq!(filetime_to_system_time(0, 0), UNIX_EPOCH);
+        // 2024-01-01T00:00:00Z
+        let ticks: u64 = 133_485_408_000_000_000;
+        let time = filetime_to_system_time(ticks as u32, (ticks >> 32) as u32);
+        assert_eq!(unix_seconds(time), Some(1_704_067_200));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn install_path_candidates_include_the_parent() {
+        assert_eq!(
+            install_path_candidates("C:\\Program Files (x86)\\World of Warcraft\\_retail_\\"),
+            vec![
+                PathBuf::from("C:\\Program Files (x86)\\World of Warcraft\\_retail_"),
+                PathBuf::from("C:\\Program Files (x86)\\World of Warcraft"),
+            ]
+        );
     }
 
     #[test]

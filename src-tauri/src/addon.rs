@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const ADDON_FOLDER: &str = "ForeverCollect";
 const DEFAULT_REPO: &str = "alexbangert/forevercollect-addon";
@@ -29,7 +30,10 @@ pub fn repository() -> String {
 }
 
 pub fn addon_dir(client_dir: &Path) -> PathBuf {
-    client_dir.join("Interface/AddOns").join(ADDON_FOLDER)
+    client_dir
+        .join("Interface")
+        .join("AddOns")
+        .join(ADDON_FOLDER)
 }
 
 /// `## Version:` of a TOC file.
@@ -252,6 +256,24 @@ pub fn extract_addon(
     Ok(())
 }
 
+const RENAME_ATTEMPTS: u32 = 5;
+const RENAME_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+/// `fs::rename` that retries briefly: on Windows a folder cannot be moved while a
+/// virus scanner or the Explorer still holds one of its files.
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match fs::rename(from, to) {
+            Err(error) if attempt < RENAME_ATTEMPTS && error.raw_os_error().is_some() => {
+                attempt += 1;
+                std::thread::sleep(RENAME_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Replaces the installed addon with the unpacked zip; the previous version is
 /// kept as `ForeverCollect.old` until the new one is in place.
 pub fn install_from_zip(
@@ -259,7 +281,7 @@ pub fn install_from_zip(
     zip_bytes: &[u8],
     expected_version: &str,
 ) -> Result<(), String> {
-    let addons = client_dir.join("Interface/AddOns");
+    let addons = client_dir.join("Interface").join("AddOns");
     fs::create_dir_all(&addons).map_err(|e| format!("AddOns-Ordner nicht anlegbar: {e}"))?;
     let target = addon_dir(client_dir);
     let staging = addons.join(format!("{ADDON_FOLDER}.new"));
@@ -273,12 +295,12 @@ pub fn install_from_zip(
     }
     let had_previous = target.is_dir();
     if had_previous {
-        fs::rename(&target, &backup)
+        rename_with_retry(&target, &backup)
             .map_err(|e| format!("Bisheriges Addon nicht verschiebbar: {e}"))?;
     }
-    if let Err(error) = fs::rename(&staging, &target) {
+    if let Err(error) = rename_with_retry(&staging, &target) {
         if had_previous {
-            let _ = fs::rename(&backup, &target);
+            let _ = rename_with_retry(&backup, &target);
         }
         let _ = fs::remove_dir_all(&staging);
         return Err(format!("Neues Addon nicht installierbar: {error}"));
@@ -311,7 +333,7 @@ mod tests {
             std::env::temp_dir().join(format!("foreverdb-addon-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::normalize_dir(&dir)
     }
 
     #[test]
@@ -348,7 +370,11 @@ mod tests {
         assert_eq!(installed_version(&client).as_deref(), Some("0.1.2"));
         assert!(old_dir.join("Core/Util.lua").is_file());
         assert!(!old_dir.join("stale.lua").exists(), "old files are gone");
-        assert!(!client.join("Interface/AddOns/ForeverCollect.old").exists());
+        assert!(!client
+            .join("Interface")
+            .join("AddOns")
+            .join("ForeverCollect.old")
+            .exists());
 
         let wrong_version =
             make_zip(&[("ForeverCollect/ForeverCollect.toc", "## Version: 0.1.3\n")]);

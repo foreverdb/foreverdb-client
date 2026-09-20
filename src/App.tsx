@@ -151,9 +151,10 @@ function App() {
 
   async function addClient(dir: string) {
     try {
-      setSettings(await invoke<Settings>("add_client", { dir }));
+      const added = await invoke<{ id: string; settings: Settings }>("add_client", { dir });
+      setSettings(added.settings);
       setDialog(null);
-      setSelected(dir);
+      setSelected(added.id);
       await refresh();
     } catch (message) {
       setDialog((current) => (current ? { ...current, error: String(message) } : current));
