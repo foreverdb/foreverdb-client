@@ -41,7 +41,14 @@ type ClientCandidate = { id: string; label: string; product: string; version: st
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
 type UploadResult = { import_id: string | null; file_path: string; running: boolean; deleted: boolean };
 type Settings = { auto_upload: boolean; extra_clients: string[]; extra_installations: string[]; has_github_token: boolean; repository: string };
-type Activity = { client: string; kind: "pending" | "uploaded" | "error" | "update"; message: string; result: UploadResult | null };
+type ImportStatus = { import_id: string; status: "queued" | "processing" | "completed" | "failed"; error: string | null };
+type Activity = {
+  client: string;
+  kind: "pending" | "uploaded" | "processing" | "completed" | "failed" | "error" | "update";
+  message: string;
+  result: UploadResult | null;
+  import: ImportStatus | null;
+};
 type LogEntry = Activity & { at: string; id: number };
 
 const REFRESH_INTERVAL_MS = 5000;
@@ -49,6 +56,15 @@ const LOG_LIMIT = 8;
 // Sequence for log entries; module-level so re-subscribing the event listener (React strict
 // mode, dependency changes) never restarts it and keys stay unique and monotonic.
 let logSequence = 0;
+
+function importTitle(status: ImportStatus | null) {
+  switch (status?.status) {
+    case "processing": return "Upload erfolgreich – wird verarbeitet ...";
+    case "completed": return "Import abgeschlossen";
+    case "failed": return "Import fehlgeschlagen";
+    default: return "Upload erfolgreich – wartet auf Verarbeitung";
+  }
+}
 
 function timestamp() {
   return new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -58,6 +74,8 @@ function App() {
   const [installation, setInstallation] = useState<Installation | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
+  // Server-side progress of the import behind `result`, reported by the Rust poller.
+  const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -131,7 +149,11 @@ function App() {
       const entry: LogEntry = { ...event.payload, at: timestamp(), id: logSequence };
       // newest first, ordered by sequence no matter in which order events are delivered
       setLog((entries) => [entry, ...entries].sort((a, b) => b.id - a.id).slice(0, LOG_LIMIT));
-      if (event.payload.result) setResult(event.payload.result);
+      if (event.payload.result) {
+        setResult(event.payload.result);
+        setImportStatus(null);
+      }
+      if (event.payload.import) setImportStatus(event.payload.import);
       if (event.payload.kind === "update") void checkRelease(false);
       void refresh();
     });
@@ -187,11 +209,17 @@ function App() {
 
   const client = installation?.clients.find((entry) => entry.id === selected) ?? null;
 
+  /** The polled status, but only while it still belongs to the shown upload. */
+  function importFor(upload: UploadResult): ImportStatus | null {
+    return importStatus && importStatus.import_id === upload.import_id ? importStatus : null;
+  }
+
   async function upload() {
     if (!client?.file_has_data) return;
     setBusy(true);
     setError("");
     setResult(null);
+    setImportStatus(null);
     try {
       setResult(await invoke<UploadResult>("upload", { client: client.id }));
       await refresh();
@@ -250,7 +278,7 @@ function App() {
                 role="tab"
                 aria-selected={entry.id === selected}
                 className={entry.id === selected ? "active" : ""}
-                onClick={() => { setSelected(entry.id); setResult(null); setError(""); }}
+                onClick={() => { setSelected(entry.id); setResult(null); setImportStatus(null); setError(""); }}
               >
                 <strong>{entry.label}</strong>
                 <span>{entry.version ?? "Version unbekannt"}</span>
@@ -337,9 +365,10 @@ function App() {
 
       {error && <div className="notice error"><strong>Upload nicht möglich</strong><span>{error}</span></div>}
       {result && (
-        <div className="notice success">
-          <strong>Upload erfolgreich</strong>
+        <div className={`notice ${importFor(result)?.status === "failed" ? "error" : "success"}`}>
+          <strong>{importTitle(importFor(result))}</strong>
           <span>{result.import_id ? `Import-ID: ${result.import_id}` : "Der Server hat den Upload angenommen."}</span>
+          {importFor(result)?.status === "failed" && <span>{importFor(result)?.error ?? "Der Server hat keinen Grund genannt."}</span>}
           <small>{result.deleted ? "Datei wurde entfernt, die nächste Sitzung startet leer." : "WoW läuft noch: Die Datei bleibt erhalten und wird beim nächsten Schreiben erneut geprüft."}</small>
         </div>
       )}

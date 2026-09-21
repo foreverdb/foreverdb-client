@@ -160,6 +160,14 @@ fn default_true() -> bool {
     true
 }
 
+/// Server-side state of an import, read from the ingress while it is polled.
+#[derive(Serialize, Clone)]
+struct ImportStatus {
+    import_id: String,
+    status: String,
+    error: Option<String>,
+}
+
 /// Progress of the background watcher, sent to the window as "activity" events.
 #[derive(Serialize, Clone)]
 struct Activity {
@@ -167,6 +175,7 @@ struct Activity {
     kind: String,
     message: String,
     result: Option<UploadResult>,
+    import: Option<ImportStatus>,
 }
 
 struct AppState {
@@ -225,6 +234,14 @@ fn target_url() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_TARGET_URL.to_string())
+}
+
+/// The ingress exposes every import next to the upload endpoint: the upload goes to
+/// `.../imports/forevercollect`, its status is read from `.../imports/{id}`.
+fn status_url(upload_url: &str, import_id: &str) -> String {
+    let base = upload_url.trim_end_matches('/');
+    let base = base.strip_suffix("/forevercollect").unwrap_or(base);
+    format!("{base}/{import_id}")
 }
 
 /// Directories a WoW installation is looked for in, most likely first. An
@@ -999,9 +1016,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
             .last_uploaded
             .insert(client_id.to_string(), content_hash);
         if let Some(now) = unix_seconds(std::time::SystemTime::now()) {
-            settings
-                .last_upload_at
-                .insert(client_id.to_string(), now);
+            settings.last_upload_at.insert(client_id.to_string(), now);
         }
     });
     archive_snapshot(
@@ -1064,8 +1079,14 @@ fn archive_snapshot(archive_dir: &Path, label: &str, import_id: Option<&str>, co
 }
 
 #[tauri::command]
-async fn upload(state: tauri::State<'_, AppState>, client: String) -> Result<UploadResult, String> {
-    upload_client(&state, &client).await
+async fn upload(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    client: String,
+) -> Result<UploadResult, String> {
+    let result = upload_client(&state, &client).await?;
+    follow_import(&app, &client, &result);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1213,8 +1234,135 @@ fn emit_activity(
             kind: kind.to_string(),
             message,
             result,
+            import: None,
         },
     );
+}
+
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// The worker redelivers an import after 15 minutes without an ack; give it a bit
+/// longer than that before the client stops asking.
+const POLL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// Network errors in a row after which the poll gives up.
+const POLL_MAX_FAILURES: u32 = 10;
+
+/// Follows an accepted import on the server until it is completed or failed and
+/// reports every status change to the window.
+async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
+    let url = status_url(&target_url(), &import_id);
+    let http = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let mut last_status = String::from("queued");
+    let mut failures = 0;
+    loop {
+        tokio_sleep(POLL_INTERVAL).await;
+        let json = match http.get(&url).send().await {
+            Ok(response) if response.status().is_success() => {
+                response.json::<serde_json::Value>().await.ok()
+            }
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                emit_import(
+                    &app,
+                    &client_id,
+                    ImportStatus {
+                        import_id,
+                        status: "failed".into(),
+                        error: Some("Der Server kennt diesen Import nicht mehr.".into()),
+                    },
+                );
+                return;
+            }
+            _ => None,
+        };
+        let Some(json) = json else {
+            failures += 1;
+            if failures >= POLL_MAX_FAILURES {
+                emit_activity(&app, &client_id, "error", format!("Import-Status von {import_id} ist nicht abrufbar; bitte später erneut prüfen."), None);
+                return;
+            }
+            continue;
+        };
+        failures = 0;
+        let status = json
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("queued")
+            .to_string();
+        let error = json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        if status != last_status {
+            emit_import(
+                &app,
+                &client_id,
+                ImportStatus {
+                    import_id: import_id.clone(),
+                    status: status.clone(),
+                    error,
+                },
+            );
+            last_status = status.clone();
+        }
+        if status == "completed" || status == "failed" {
+            return;
+        }
+        if started.elapsed() >= POLL_TIMEOUT {
+            emit_activity(
+                &app,
+                &client_id,
+                "error",
+                format!(
+                    "Import {import_id} ist nach {} Minuten noch nicht abgeschlossen.",
+                    POLL_TIMEOUT.as_secs() / 60
+                ),
+                None,
+            );
+            return;
+        }
+    }
+}
+
+fn emit_import(app: &AppHandle, client: &str, import: ImportStatus) {
+    let (kind, message) = match import.status.as_str() {
+        "processing" => (
+            "processing",
+            format!("Import {} wird verarbeitet.", import.import_id),
+        ),
+        "completed" => (
+            "completed",
+            format!("Import {} abgeschlossen.", import.import_id),
+        ),
+        "failed" => (
+            "failed",
+            format!(
+                "Import {} fehlgeschlagen: {}",
+                import.import_id,
+                import.error.as_deref().unwrap_or("unbekannter Fehler")
+            ),
+        ),
+        _ => (
+            "pending",
+            format!("Import {} wartet in der Warteschlange.", import.import_id),
+        ),
+    };
+    let _ = app.emit(
+        "activity",
+        Activity {
+            client: client.to_string(),
+            kind: kind.to_string(),
+            message,
+            result: None,
+            import: Some(import),
+        },
+    );
+}
+
+/// Starts following the import an upload produced, if the server returned one.
+fn follow_import(app: &AppHandle, client_id: &str, result: &UploadResult) {
+    if let Some(id) = &result.import_id {
+        tauri::async_runtime::spawn(poll_import(app.clone(), client_id.to_string(), id.clone()));
+    }
 }
 
 fn is_settled(path: &Path) -> bool {
@@ -1264,16 +1412,19 @@ async fn watch_and_upload(app: AppHandle) {
                 None,
             );
             match upload_client(&state, &client.id).await {
-                Ok(result) => emit_activity(
-                    &app,
-                    &client.id,
-                    "uploaded",
-                    match &result.import_id {
-                        Some(id) => format!("Upload erfolgreich (Import-ID {id})."),
-                        None => "Upload erfolgreich.".to_string(),
-                    },
-                    Some(result),
-                ),
+                Ok(result) => {
+                    follow_import(&app, &client.id, &result);
+                    emit_activity(
+                        &app,
+                        &client.id,
+                        "uploaded",
+                        match &result.import_id {
+                            Some(id) => format!("Upload erfolgreich (Import-ID {id})."),
+                            None => "Upload erfolgreich.".to_string(),
+                        },
+                        Some(result),
+                    )
+                }
                 Err(error) => emit_activity(&app, &client.id, "error", error, None),
             }
         }
@@ -1387,6 +1538,22 @@ mod tests {
         );
         assert!(client_from_dir(&root.join("Data")).is_none());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn status_url_sits_next_to_the_upload_endpoint() {
+        assert_eq!(
+            status_url("https://host/imports/forevercollect", "abc"),
+            "https://host/imports/abc"
+        );
+        assert_eq!(
+            status_url("https://host/imports/", "abc"),
+            "https://host/imports/abc"
+        );
+        assert_eq!(
+            status_url("https://host/imports", "abc"),
+            "https://host/imports/abc"
+        );
     }
 
     #[test]

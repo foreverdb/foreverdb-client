@@ -67,6 +67,9 @@ footer { text-align: center; margin-top: 38px; } footer span { padding: 0 6px; c
 .activity .time { color: #7f8992; font: 12px 'DM Mono', monospace; flex-shrink: 0; padding-top: 1px; }
 .activity li.error { color: #dc806d; }
 .activity li.uploaded { color: #b5d46a; }
+.activity li.processing { color: #e6cf6a; }
+.activity li.completed { color: #b5d46a; }
+.activity li.failed { color: #dc806d; }
 
 .link { background: none; border: 0; padding: 0; color: #b5d46a; font: 600 12px Manrope, sans-serif; }
 .link:hover { text-decoration: underline; }
