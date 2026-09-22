@@ -4,7 +4,7 @@
 # FOREVERDB_GITHUB_TOKEN in der Umgebung wird beim Build einkompiliert (Addon-Updates).
 # pkgver mit package.json, src-tauri/Cargo.toml und src-tauri/tauri.conf.json gleich halten.
 pkgname=foreverdb-client
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch"
 arch=('x86_64')
