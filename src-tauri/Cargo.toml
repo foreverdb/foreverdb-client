@@ -1,6 +1,6 @@
 [package]
 name = "foreverdb-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch"
 authors = ["Alex Bangert"]
 license = "MIT"
