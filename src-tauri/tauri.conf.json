@@ -26,10 +26,18 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Utility",
+    "publisher": "Alex Bangert",
+    "homepage": "https://github.com/alexbangert/foreverdb",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "shortDescription": "Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch",
+    "longDescription": "Desktop-Uploader für die SavedVariables des ForeverCollect-Addons. Erkennt WoW-Installationen (Wine, Lutris, Faugus, Bottles, Windows), überwacht die ForeverCollect.lua jedes Clients und lädt jede neue Schreibung automatisch zum ForeverDB-Ingress hoch; von jedem Upload bleibt eine Archivkopie.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ]

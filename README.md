@@ -18,6 +18,26 @@ Der Client fragt beim Start und alle 6 Stunden das neueste Release des Addon-Rep
 
 Das Repository ist privat, daher braucht die Abfrage ein GitHub-Token (Fine-grained PAT, nur dieses Repository, Berechtigung „Contents: Read-only“). Reihenfolge: Umgebungsvariable `FOREVERDB_GITHUB_TOKEN` zur Laufzeit, sonst der beim Build einkompilierte Wert (`FOREVERDB_GITHUB_TOKEN=github_pat_… pnpm tauri build`), sonst `github_token` in `settings.json`. Das Token steht nie im Quellcode und wird dem Fenster nicht übergeben.
 
+## Linux
+
+Der Client läuft nativ (GTK 3 + WebKitGTK) und findet WoW in Wine-Prefixen von Faugus, Lutris, Bottles und `~/.wine`; das laufende Spiel wird über `/proc` erkannt. Deshalb kein Flatpak: In der Sandbox wären weder die Prefixe unter `~/.var/app/…` noch die `Wow*.exe`-Prozesse des Hosts sichtbar.
+
+**Bauen** braucht Rust, Node + pnpm und die WebKitGTK-Entwicklungspakete:
+
+- Arch/CachyOS: `webkit2gtk-4.1 gtk3 libsoup3 base-devel` (plus `cargo pnpm nodejs`)
+- Debian/Ubuntu: `libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev build-essential`
+- Fedora: `webkit2gtk4.1-devel gtk3-devel libsoup3-devel librsvg2-devel`
+
+Dann `pnpm install` und `pnpm tauri build` (auf Arch-basierten Systemen `NO_STRIP=true pnpm tauri build`: das in `linuxdeploy` mitgelieferte alte `strip` kennt die `.relr.dyn`-Sektionen aktueller Bibliotheken nicht und lässt sonst den AppImage-Schritt scheitern). `src-tauri/tauri.linux.conf.json` wählt die Ziele; die Pakete liegen unter `src-tauri/target/release/bundle/`, benannt nach dem `productName`:
+
+- `deb/ForeverDB Client_<Version>_amd64.deb` → `sudo apt install "./ForeverDB Client_<Version>_amd64.deb"`; Paketname ist `forever-db-client`, Abhängigkeiten `libwebkit2gtk-4.1-0`, `libgtk-3-0`
+- `rpm/ForeverDB Client-<Version>-1.x86_64.rpm` → `sudo dnf install "./ForeverDB Client-<Version>-1.x86_64.rpm"`
+- `appimage/ForeverDB Client_<Version>_amd64.AppImage` → ausführbar machen und starten; läuft ohne Installation, braucht aber eine glibc mindestens so neu wie die des Build-Systems. Beim Bauen lädt Tauri `linuxdeploy` nach (Netzzugang nötig). Nur ein Ziel: `pnpm tauri build --bundles appimage`.
+
+**Arch/CachyOS** als Paket: `./install.sh` (oder `cd packaging/arch && makepkg -si`) baut aus dem Checkout (kein Download) und installiert Binary, `.desktop`-Datei und Icons; `pacman -Rns foreverdb-client` entfernt es wieder. `FOREVERDB_GITHUB_TOKEN` in der Umgebung wird wie bei `pnpm tauri build` einkompiliert (siehe „Addon-Updates“).
+
+Datenpfade siehe „Automatischer Upload“. Bleibt das Fenster weiß oder leer (typisch Wayland mit NVIDIA), hilft `WEBKIT_DISABLE_DMABUF_RENDERER=1 foreverdb-client`.
+
 ## Windows
 
 Der Client läuft nativ unter Windows 10/11 und braucht die WebView2-Runtime (dort vorinstalliert; der Installer lädt sie andernfalls nach). Der Build liefert einen NSIS-Installer, der ohne Administratorrechte für den aktuellen Benutzer installiert (`src-tauri/tauri.windows.conf.json`). Voraussetzungen zum Bauen: Rust (MSVC-Toolchain, Visual Studio Build Tools mit C++), Node + pnpm. Dann `pnpm install` und `pnpm tauri build`; der Installer liegt unter `src-tauri/target/release/bundle/nsis/ForeverDB Client_<Version>_x64-setup.exe`. `cargo test` in `src-tauri` prüft dort auch die Prozess- und Pfad-Erkennung (ToolHelp32, kanonische Pfade). Das laufende Spiel wird über die Prozessliste erkannt, Pfade aus dem Ordnerdialog werden auf ihre Schreibweise auf der Platte normalisiert, sodass derselbe Client nicht doppelt erscheint.

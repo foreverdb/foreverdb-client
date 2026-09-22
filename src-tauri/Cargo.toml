@@ -1,8 +1,11 @@
 [package]
 name = "foreverdb-client"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch"
+authors = ["Alex Bangert"]
+license = "MIT"
+homepage = "https://github.com/alexbangert/foreverdb"
+repository = "https://github.com/alexbangert/foreverdb"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

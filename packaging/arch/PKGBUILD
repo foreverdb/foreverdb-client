@@ -1,0 +1,35 @@
+# Maintainer: Alex Bangert
+# Baut aus dem Checkout, in dem diese Datei liegt (kein Download):
+#   cd packaging/arch && makepkg -si
+# FOREVERDB_GITHUB_TOKEN in der Umgebung wird beim Build einkompiliert (Addon-Updates).
+# pkgver mit package.json, src-tauri/Cargo.toml und src-tauri/tauri.conf.json gleich halten.
+pkgname=foreverdb-client
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch"
+arch=('x86_64')
+url="https://github.com/alexbangert/foreverdb"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2')
+makedepends=('cargo' 'rust' 'pnpm' 'nodejs')
+options=('!lto' '!debug')
+
+_srcdir="$startdir/../.."
+
+build() {
+  cd "$_srcdir"
+  export CARGO_TARGET_DIR="$_srcdir/src-tauri/target"
+  pnpm install --frozen-lockfile
+  pnpm tauri build --no-bundle
+}
+
+package() {
+  cd "$_srcdir"
+  install -Dm755 src-tauri/target/release/foreverdb-client "$pkgdir/usr/bin/foreverdb-client"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 packaging/linux/foreverdb-client.desktop "$pkgdir/usr/share/applications/foreverdb-client.desktop"
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/foreverdb-client.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/foreverdb-client.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/foreverdb-client.png"
+  install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/foreverdb-client.png"
+}

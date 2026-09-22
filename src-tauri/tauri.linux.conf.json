@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "linux": {
+      "deb": {
+        "section": "utils",
+        "files": { "/usr/share/doc/forever-db-client/copyright": "../LICENSE" }
+      },
+      "rpm": {
+        "files": { "/usr/share/licenses/forever-db-client/LICENSE": "../LICENSE" }
+      },
+      "appimage": { "bundleMediaFramework": false }
+    }
+  }
+}

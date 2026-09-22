@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ForeverDB Client
+Comment=Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch
+Exec=foreverdb-client
+Icon=foreverdb-client
+Terminal=false
+Categories=Utility;Game;
+Keywords=WoW;World of Warcraft;ForeverCollect;ForeverDB;
+StartupWMClass=foreverdb-client
