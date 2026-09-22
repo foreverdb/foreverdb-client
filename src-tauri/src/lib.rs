@@ -1,14 +1,17 @@
-use reqwest::multipart::{Form, Part};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 mod addon;
+mod lua;
 use addon::AddonRelease;
 
 // The user only picks a WoW client; installation directory, account, file and
@@ -963,6 +966,40 @@ fn client_by_id(settings: &Settings, id: &str) -> Result<ClientDef, String> {
         .ok_or_else(|| format!("Client-Ordner '{id}' ist nicht mehr lesbar."))
 }
 
+/// Kennzeichnet den Upload gegenüber dem Ingress; landet dort in `import_jobs.source`,
+/// sodass eine Parser-Regression einem Client-Release zuzuordnen ist.
+const CLIENT_TAG: &str = concat!("foreverdb-client/", env!("CARGO_PKG_VERSION"));
+
+fn gzip(payload: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(payload)?;
+    encoder.finish()
+}
+
+/// Ob eine Ablehnung sich mit demselben Inhalt wiederholen würde. 408 und 429 sind
+/// Aufforderungen, es später erneut zu versuchen, und zählen deshalb nicht dazu.
+fn is_permanent_rejection(status: reqwest::StatusCode) -> bool {
+    status.is_client_error()
+        && status != reqwest::StatusCode::REQUEST_TIMEOUT
+        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Merkt sich den Inhalt als abgehandelt, damit der Watcher ihn nicht erneut anfasst.
+/// `secured` unterscheidet einen echten Upload von einer dauerhaften Ablehnung: nur
+/// ersterer verschiebt den Zeitpunkt, ab dem die Datei als gesichert gilt.
+fn remember_upload(state: &AppState, client_id: &str, content_hash: u64, secured: bool) {
+    state.update(|settings| {
+        settings
+            .last_uploaded
+            .insert(client_id.to_string(), content_hash);
+        if secured {
+            if let Some(now) = unix_seconds(std::time::SystemTime::now()) {
+                settings.last_upload_at.insert(client_id.to_string(), now);
+            }
+        }
+    });
+}
+
 /// Uploads the client's SavedVariables (or their .bak, see `snapshot_source`), keeps an
 /// archive copy, and removes the uploaded data so the next session starts empty.
 async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult, String> {
@@ -986,22 +1023,39 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
     let content_hash = hasher.finish();
-    let form = Form::new().part(
-        "file",
-        Part::bytes(content.clone())
-            .file_name("ForeverCollect.lua")
-            .mime_str("text/plain")
-            .map_err(|e| format!("Upload konnte nicht vorbereitet werden: {e}"))?,
-    );
+
+    // Der Server bekommt nur noch JSON. Scheitert die Umwandlung, ist der Snapshot
+    // selbst kaputt oder zu neu: archivieren, als erledigt vormerken (sonst versucht
+    // der Watcher es alle paar Sekunden erneut) und die Datei liegen lassen.
+    let snapshot = match lua::parse_forever_collect(&content) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            archive_snapshot(&state.archive_dir, &def.label, None, &content);
+            remember_upload(state, client_id, content_hash, false);
+            return Err(format!("Snapshot konnte nicht gelesen werden: {error}"));
+        }
+    };
+    let payload = serde_json::to_vec(&snapshot)
+        .map_err(|e| format!("Snapshot konnte nicht als JSON kodiert werden: {e}"))?;
+    let compressed = gzip(&payload).map_err(|e| format!("Upload konnte nicht vorbereitet werden: {e}"))?;
+
     let response = reqwest::Client::new()
         .post(target_url())
-        .multipart(form)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::CONTENT_ENCODING, "gzip")
+        .header("X-ForeverDB-Client", CLIENT_TAG)
+        .body(compressed)
         .send()
         .await
         .map_err(|e| format!("Upload fehlgeschlagen: {e}"))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // Eine dauerhafte Ablehnung wiederholt sich mit demselben Inhalt immer gleich.
+        if is_permanent_rejection(status) {
+            archive_snapshot(&state.archive_dir, &def.label, None, &content);
+            remember_upload(state, client_id, content_hash, false);
+        }
         return Err(format!(
             "Server lehnte den Upload ab ({}): {}",
             status,
@@ -1011,14 +1065,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let import_id = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|json| json.get("id").and_then(|id| id.as_str()).map(str::to_owned));
-    state.update(|settings| {
-        settings
-            .last_uploaded
-            .insert(client_id.to_string(), content_hash);
-        if let Some(now) = unix_seconds(std::time::SystemTime::now()) {
-            settings.last_upload_at.insert(client_id.to_string(), now);
-        }
-    });
+    remember_upload(state, client_id, content_hash, true);
     archive_snapshot(
         &state.archive_dir,
         &def.label,
@@ -1477,6 +1524,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir =
@@ -1538,6 +1586,30 @@ mod tests {
         );
         assert!(client_from_dir(&root.join("Data")).is_none());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn gzips_the_request_body() {
+        let payload = br#"{"schemaVersion":9}"#;
+        let compressed = gzip(payload).unwrap();
+        assert_eq!(&compressed[..2], &[0x1f, 0x8b], "gzip magic");
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(&compressed[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn only_permanent_rejections_mark_the_content_as_handled() {
+        use reqwest::StatusCode;
+        assert!(is_permanent_rejection(StatusCode::BAD_REQUEST));
+        assert!(is_permanent_rejection(StatusCode::UNSUPPORTED_MEDIA_TYPE));
+        assert!(is_permanent_rejection(StatusCode::PAYLOAD_TOO_LARGE));
+        assert!(!is_permanent_rejection(StatusCode::REQUEST_TIMEOUT));
+        assert!(!is_permanent_rejection(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_permanent_rejection(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!is_permanent_rejection(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     #[test]
