@@ -12,7 +12,8 @@ const DEFAULT_REPO: &str = "foreverdb/forevercollect-addon";
 const USER_AGENT: &str = "foreverdb-client";
 
 /// Token precedence: runtime environment, value compiled in at build time
-/// (`FOREVERDB_GITHUB_TOKEN=... pnpm tauri build`), stored settings.
+/// (`FOREVERDB_GITHUB_TOKEN=... pnpm tauri build` or `src-tauri/github-token`),
+/// stored settings.
 pub fn github_token(stored: Option<&str>) -> Option<String> {
     std::env::var("FOREVERDB_GITHUB_TOKEN")
         .ok()

@@ -22,7 +22,7 @@ WoW schreibt die SavedVariables nur beim Ausloggen, bei `/reload` und beim Beend
 
 Der Client fragt beim Start und alle 6 Stunden das neueste Release des Addon-Repositories (`foreverdb/forevercollect-addon`, überschreibbar per `FOREVERDB_ADDON_REPO`) ab und vergleicht es mit `## Version:` der installierten `Interface/AddOns/ForeverCollect/ForeverCollect.toc` je Client. Ist es neuer (oder das Addon fehlt), zeigt die Client-Karte „ForeverCollect vX.Y.Z verfügbar“ mit „Aktualisieren“/„Installieren“: Das Release-Zip wird geladen, geprüft (nur `ForeverCollect/`, TOC-Version muss zum Release passen) und der Addon-Ordner atomar ersetzt; bei laufendem Spiel gilt es ab dem nächsten Login.
 
-Das Repository ist privat, daher braucht die Abfrage ein GitHub-Token (Fine-grained PAT, nur dieses Repository, Berechtigung „Contents: Read-only“). Reihenfolge: Umgebungsvariable `FOREVERDB_GITHUB_TOKEN` zur Laufzeit, sonst der beim Build einkompilierte Wert (`FOREVERDB_GITHUB_TOKEN=github_pat_… pnpm tauri build`), sonst `github_token` in `settings.json`. Das Token steht nie im Quellcode und wird dem Fenster nicht übergeben.
+Das Repository ist privat, daher braucht die Abfrage ein GitHub-Token (Fine-grained PAT, nur dieses Repository, Berechtigung „Contents: Read-only“). Reihenfolge: Umgebungsvariable `FOREVERDB_GITHUB_TOKEN` zur Laufzeit, sonst der beim Build einkompilierte Wert, sonst `github_token` in `settings.json`. Einkompiliert wird `FOREVERDB_GITHUB_TOKEN` aus der Build-Umgebung (`FOREVERDB_GITHUB_TOKEN=github_pat_… pnpm tauri build`) oder, wenn nicht gesetzt, der Inhalt von `src-tauri/github-token` – dort das Token einmal ablegen, dann nimmt es jeder Build (auch `./install.sh`) mit. Die Datei ist per `.gitignore` ausgenommen; das Token steckt aber im Klartext in der Binary und wird dem Fenster nicht übergeben.
 
 ## Linux
 
@@ -40,7 +40,7 @@ Dann `pnpm install` und `pnpm tauri build` (auf Arch-basierten Systemen `NO_STRI
 - `rpm/ForeverDB Client-<Version>-1.x86_64.rpm` → `sudo dnf install "./ForeverDB Client-<Version>-1.x86_64.rpm"`
 - `appimage/ForeverDB Client_<Version>_amd64.AppImage` → ausführbar machen und starten; läuft ohne Installation, braucht aber eine glibc mindestens so neu wie die des Build-Systems. Beim Bauen lädt Tauri `linuxdeploy` nach (Netzzugang nötig). Nur ein Ziel: `pnpm tauri build --bundles appimage`.
 
-**Arch/CachyOS** als Paket: `./install.sh` (oder `cd packaging/arch && makepkg -si`) baut aus dem Checkout (kein Download) und installiert Binary, `.desktop`-Datei und Icons; `pacman -Rns foreverdb-client` entfernt es wieder. `FOREVERDB_GITHUB_TOKEN` in der Umgebung wird wie bei `pnpm tauri build` einkompiliert (siehe „Addon-Updates“).
+**Arch/CachyOS** als Paket: `./install.sh` (oder `cd packaging/arch && makepkg -si`) baut aus dem Checkout (kein Download) und installiert Binary, `.desktop`-Datei und Icons; `pacman -Rns foreverdb-client` entfernt es wieder. `FOREVERDB_GITHUB_TOKEN` bzw. `src-tauri/github-token` wird wie bei `pnpm tauri build` einkompiliert (siehe „Addon-Updates“).
 
 Datenpfade siehe „Automatischer Upload“. Bleibt das Fenster weiß oder leer (typisch Wayland mit NVIDIA), hilft `WEBKIT_DISABLE_DMABUF_RENDERER=1 foreverdb-client`.
 
