@@ -20,7 +20,7 @@ WoW schreibt die SavedVariables nur beim Ausloggen, bei `/reload` und beim Beend
 
 ## Addon-Updates
 
-Der Client fragt beim Start und alle 6 Stunden das neueste Release des Addon-Repositories (`alexbangert/forevercollect-addon`, überschreibbar per `FOREVERDB_ADDON_REPO`) ab und vergleicht es mit `## Version:` der installierten `Interface/AddOns/ForeverCollect/ForeverCollect.toc` je Client. Ist es neuer (oder das Addon fehlt), zeigt die Client-Karte „ForeverCollect vX.Y.Z verfügbar“ mit „Aktualisieren“/„Installieren“: Das Release-Zip wird geladen, geprüft (nur `ForeverCollect/`, TOC-Version muss zum Release passen) und der Addon-Ordner atomar ersetzt; bei laufendem Spiel gilt es ab dem nächsten Login.
+Der Client fragt beim Start und alle 6 Stunden das neueste Release des Addon-Repositories (`foreverdb/forevercollect-addon`, überschreibbar per `FOREVERDB_ADDON_REPO`) ab und vergleicht es mit `## Version:` der installierten `Interface/AddOns/ForeverCollect/ForeverCollect.toc` je Client. Ist es neuer (oder das Addon fehlt), zeigt die Client-Karte „ForeverCollect vX.Y.Z verfügbar“ mit „Aktualisieren“/„Installieren“: Das Release-Zip wird geladen, geprüft (nur `ForeverCollect/`, TOC-Version muss zum Release passen) und der Addon-Ordner atomar ersetzt; bei laufendem Spiel gilt es ab dem nächsten Login.
 
 Das Repository ist privat, daher braucht die Abfrage ein GitHub-Token (Fine-grained PAT, nur dieses Repository, Berechtigung „Contents: Read-only“). Reihenfolge: Umgebungsvariable `FOREVERDB_GITHUB_TOKEN` zur Laufzeit, sonst der beim Build einkompilierte Wert (`FOREVERDB_GITHUB_TOKEN=github_pat_… pnpm tauri build`), sonst `github_token` in `settings.json`. Das Token steht nie im Quellcode und wird dem Fenster nicht übergeben.
 

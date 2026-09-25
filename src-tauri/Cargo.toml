@@ -4,8 +4,8 @@ version = "0.2.0"
 description = "Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch"
 authors = ["Alex Bangert"]
 license = "MIT"
-homepage = "https://github.com/alexbangert/foreverdb"
-repository = "https://github.com/alexbangert/foreverdb"
+homepage = "https://github.com/foreverdb/foreverdb"
+repository = "https://github.com/foreverdb/foreverdb"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

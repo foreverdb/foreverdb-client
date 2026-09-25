@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const ADDON_FOLDER: &str = "ForeverCollect";
-const DEFAULT_REPO: &str = "alexbangert/forevercollect-addon";
+const DEFAULT_REPO: &str = "foreverdb/forevercollect-addon";
 const USER_AGENT: &str = "foreverdb-client";
 
 /// Token precedence: runtime environment, value compiled in at build time
