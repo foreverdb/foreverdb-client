@@ -44,7 +44,7 @@ type Settings = { auto_upload: boolean; extra_clients: string[]; extra_installat
 type ImportStatus = { import_id: string; status: "queued" | "processing" | "completed" | "failed"; error: string | null };
 type Activity = {
   client: string;
-  kind: "pending" | "uploaded" | "processing" | "completed" | "failed" | "error" | "update";
+  kind: "pending" | "uploaded" | "cleaned" | "processing" | "completed" | "failed" | "error" | "update";
   message: string;
   result: UploadResult | null;
   import: ImportStatus | null;

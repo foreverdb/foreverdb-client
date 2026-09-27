@@ -1073,25 +1073,30 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
         &content,
     );
 
-    // WoW rewrites the SavedVariables on logout, so the current file is only removed
-    // once the game is closed; an uploaded .bak is never read by the game again.
     let running = wow_is_running(&def.process);
-    let deleted = if source.from_backup {
-        let _ = fs::remove_file(&source.path);
-        !running && !file_has_catalogs(&main_path) && fs::remove_file(&main_path).is_ok()
-    } else {
-        let removed = !running && fs::remove_file(&source.path).is_ok();
-        if removed {
-            let _ = fs::remove_file(backup_path(&source.path));
-        }
-        removed
-    };
+    let deleted = delete_uploaded_snapshot(&source, &main_path, running);
     Ok(UploadResult {
         import_id,
         file_path: source.path.to_string_lossy().into_owned(),
         running,
         deleted,
     })
+}
+
+/// Removes an uploaded snapshot. WoW rewrites the SavedVariables on logout, so the current
+/// file is only removed once the game is closed; an uploaded .bak is never read by the game
+/// again. Returns whether the current file is gone.
+fn delete_uploaded_snapshot(source: &SnapshotSource, main_path: &Path, running: bool) -> bool {
+    if source.from_backup {
+        let _ = fs::remove_file(&source.path);
+        !running && !file_has_catalogs(main_path) && fs::remove_file(main_path).is_ok()
+    } else {
+        let removed = !running && fs::remove_file(&source.path).is_ok();
+        if removed {
+            let _ = fs::remove_file(backup_path(&source.path));
+        }
+        removed
+    }
 }
 
 const ARCHIVE_LIMIT: usize = 30;
@@ -1428,6 +1433,13 @@ fn should_upload(has_data: bool, settled: bool, already_uploaded: bool) -> bool 
     has_data && settled && !already_uploaded
 }
 
+/// Whether an already uploaded snapshot can be removed now. The upload right after a
+/// logout usually still sees the game process (it is shutting down, or only the character
+/// screen was reached), so the watcher removes the unchanged file once the game is closed.
+fn should_delete(already_uploaded: bool, running: bool) -> bool {
+    already_uploaded && !running
+}
+
 /// Watches the SavedVariables of every active client and uploads each new write.
 async fn watch_and_upload(app: AppHandle) {
     loop {
@@ -1444,6 +1456,28 @@ async fn watch_and_upload(app: AppHandle) {
             };
             let already_uploaded = file_hash(&path)
                 .is_some_and(|hash| settings.last_uploaded.get(&client.id) == Some(&hash));
+            if should_delete(already_uploaded, client.running) {
+                let main_path = saved_variables_path(Path::new(&client.id));
+                let source = SnapshotSource {
+                    path: path.clone(),
+                    from_backup: client.from_backup,
+                };
+                if let Some(main_path) = main_path {
+                    if delete_uploaded_snapshot(&source, &main_path, false) {
+                        emit_activity(
+                            &app,
+                            &client.id,
+                            "cleaned",
+                            format!(
+                                "{}: hochgeladene Daten nach Spielende gelöscht.",
+                                client.label
+                            ),
+                            None,
+                        );
+                    }
+                }
+                continue;
+            }
             if !should_upload(client.file_has_data, is_settled(&path), already_uploaded) {
                 continue;
             }
@@ -1713,6 +1747,52 @@ mod tests {
         let filled = b"ForeverCollectDB = {\n[\"catalogs\"] = {\n[\"1:16001:0:enUS:9:7:Alliance\"] = {\n[\"scannedAt\"] = 1,\n},\n},\n}\n";
         assert!(snapshot_has_catalogs(filled));
         assert!(!snapshot_has_catalogs(b"garbage"));
+    }
+
+    #[test]
+    fn should_delete_only_uploaded_data_of_a_closed_game() {
+        assert!(should_delete(true, false));
+        assert!(
+            !should_delete(true, true),
+            "WoW rewrites the file on logout"
+        );
+        assert!(!should_delete(false, false), "not uploaded yet");
+    }
+
+    #[test]
+    fn deleting_an_uploaded_snapshot_keeps_newer_data() {
+        let dir = temp_dir("delete-snapshot");
+        let main = dir.join("ForeverCollect.lua");
+        let backup = backup_path(&main);
+
+        fs::write(&main, "x").unwrap();
+        fs::write(&backup, "x").unwrap();
+        let current = SnapshotSource {
+            path: main.clone(),
+            from_backup: false,
+        };
+        assert!(
+            !delete_uploaded_snapshot(&current, &main, true),
+            "game still running"
+        );
+        assert!(main.exists() && backup.exists());
+        assert!(delete_uploaded_snapshot(&current, &main, false));
+        assert!(!main.exists() && !backup.exists());
+
+        // an uploaded .bak goes; a current file with new catalogs stays for its own upload
+        fs::write(
+            &main,
+            "ForeverCollectDB = {\n[\"catalogs\"] = {\n[\"k\"] = {},\n},\n}\n",
+        )
+        .unwrap();
+        fs::write(&backup, "x").unwrap();
+        let from_backup = SnapshotSource {
+            path: backup.clone(),
+            from_backup: true,
+        };
+        assert!(!delete_uploaded_snapshot(&from_backup, &main, false));
+        assert!(main.exists() && !backup.exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
