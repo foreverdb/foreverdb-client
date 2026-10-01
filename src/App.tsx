@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -24,9 +24,11 @@ type ClientStatus = {
 };
 
 const UNSAVED_WARNING_HOURS = 2;
+// English texts with a 24-hour clock and day-first dates.
+const LOCALE = "en-GB";
 
 function clock(unixSeconds: number) {
-  return new Date(unixSeconds * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  return new Date(unixSeconds * 1000).toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" });
 }
 
 /** Hours the running game has gone without writing its SavedVariables. */
@@ -59,24 +61,30 @@ let logSequence = 0;
 
 function importTitle(status: ImportStatus | null) {
   switch (status?.status) {
-    case "processing": return "Upload erfolgreich – wird verarbeitet ...";
-    case "completed": return "Import abgeschlossen";
-    case "failed": return "Import fehlgeschlagen";
-    default: return "Upload erfolgreich – wartet auf Verarbeitung";
+    case "processing": return "Upload succeeded – processing ...";
+    case "completed": return "Import completed";
+    case "failed": return "Import failed";
+    default: return "Upload succeeded – waiting to be processed";
   }
 }
 
 function timestamp() {
-  return new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return new Date().toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function App() {
   const [installation, setInstallation] = useState<Installation | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // Read by the activity listener, which is not re-subscribed when the selection changes.
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [result, setResult] = useState<UploadResult | null>(null);
   // Server-side progress of the import behind `result`, reported by the Rust poller.
   const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
+  // General errors (detection, settings); upload and addon errors stay in their cards.
   const [error, setError] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const [addonError, setAddonError] = useState("");
   const [busy, setBusy] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -128,13 +136,13 @@ function App() {
   async function installAddon() {
     if (!client) return;
     setInstalling(true);
-    setError("");
+    setAddonError("");
     setInstalled(null);
     try {
       setInstalled(await invoke<InstallResult>("install_addon", { client: client.id }));
       await refresh();
     } catch (message) {
-      setError(String(message));
+      setAddonError(String(message));
     } finally {
       setInstalling(false);
     }
@@ -154,6 +162,10 @@ function App() {
         setImportStatus(null);
       }
       if (event.payload.import) setImportStatus(event.payload.import);
+      // The watcher removes an uploaded file once the game has closed, after the upload result came in.
+      if (event.payload.kind === "cleaned" && event.payload.client === selectedRef.current) {
+        setResult((current) => current && { ...current, running: false, deleted: true });
+      }
       if (event.payload.kind === "update") void checkRelease(false);
       void refresh();
     });
@@ -184,7 +196,7 @@ function App() {
   }
 
   async function chooseFolder() {
-    const picked = await open({ directory: true, multiple: false, title: "WoW-Installation („World of Warcraft“) oder Client-Ordner (z. B. _classic_era_) wählen" });
+    const picked = await open({ directory: true, multiple: false, title: "Choose your WoW installation (\"World of Warcraft\") or its Forever folder (_classic_beta_)" });
     if (typeof picked === "string") await addClient(picked);
   }
 
@@ -217,18 +229,30 @@ function App() {
   async function upload() {
     if (!client?.file_has_data) return;
     setBusy(true);
-    setError("");
+    setUploadError("");
     setResult(null);
     setImportStatus(null);
     try {
       setResult(await invoke<UploadResult>("upload", { client: client.id }));
       await refresh();
     } catch (message) {
-      setError(String(message));
+      setUploadError(String(message));
     } finally {
       setBusy(false);
     }
   }
+
+  function selectClient(id: string) {
+    setSelected(id);
+    setResult(null);
+    setImportStatus(null);
+    setUploadError("");
+    setAddonError("");
+    setInstalled(null);
+  }
+
+  const clients = installation?.clients ?? [];
+  const addonState = client?.addon_update ? "update" : client?.addon_version ? "ok" : "missing";
 
   return (
     <main className="shell">
@@ -236,122 +260,174 @@ function App() {
         <div className="mark">F<span>DB</span></div>
         <div>
           <p className="eyebrow">ForeverCollect / Desktop uploader</p>
-          <h1>Gesammelte Daten hochladen.</h1>
+          <h1>Upload your collected data.</h1>
         </div>
       </header>
 
       <section className="intro">
-        <p>Wähle den WoW-Client. Jedes Mal, wenn WoW die ForeverCollect-Datei schreibt (Ausloggen, /reload, Beenden), wird sie automatisch hochgeladen; von jedem Upload bleibt eine Kopie im Archiv.</p>
+        <p>
+          ForeverCollect records what you see in World of Warcraft: Forever. Every time the game writes its data (logout, /reload, exit),
+          this client uploads it to ForeverDB and keeps a copy in its archive.
+        </p>
         <label className="switch">
           <input type="checkbox" checked={settings?.auto_upload ?? true} onChange={toggleAutoUpload} disabled={settings === null} />
           <span className="track" />
-          <span>Automatisch hochladen, sobald WoW die Datei schreibt</span>
+          <span>Upload automatically whenever WoW writes the file</span>
         </label>
       </section>
 
-      {installation === null && <div className="card"><p className="muted">Suche WoW-Installation ...</p></div>}
+      {installation === null && <div className="card"><p className="muted">Looking for World of Warcraft ...</p></div>}
 
-      {installation && installation.wow_dir === null && (
+      {installation && installation.wow_dir === null && clients.length === 0 && (
         <div className="notice error">
-          <strong>Keine World-of-Warcraft-Installation gefunden</strong>
-          <span>Gesucht wurde in:</span>
+          <strong>No World of Warcraft: Forever installation found</strong>
+          <span>Searched in:</span>
           <ul className="paths">{installation.searched.map((path) => <li key={path}>{path}</li>)}</ul>
-          <small>Setze FOREVERDB_WOW_DIR oder füge die Installation hinzu.</small>
-          <div className="dialog-actions"><button className="secondary" onClick={openAddDialog}>+ Installation hinzufügen</button></div>
+          <small>Set FOREVERDB_WOW_DIR or choose the installation folder.</small>
+          <div className="dialog-actions"><button className="secondary" onClick={openAddDialog}>Choose folder …</button></div>
         </div>
       )}
 
-      {installation?.wow_dir && (
-        <section className="card">
-          <div className="section-heading">
-            <div>
-              <h2>Client</h2>
-              {installation.installations.map((dir) => <p key={dir}>{dir}</p>)}
-            </div>
-            <button className="link" onClick={openAddDialog}>+ Client hinzufügen</button>
-          </div>
-          {installation.clients.length === 0 && <p className="muted">Kein installierter Client gefunden. Füge einen Client-Ordner hinzu.</p>}
-          <div className="client-tabs" role="tablist" aria-label="WoW-Client">
-            {installation.clients.map((entry) => (
-              <button
-                key={entry.id}
-                role="tab"
-                aria-selected={entry.id === selected}
-                className={entry.id === selected ? "active" : ""}
-                onClick={() => { setSelected(entry.id); setResult(null); setImportStatus(null); setError(""); }}
-              >
-                <strong>{entry.label}</strong>
-                <span>{entry.version ?? "Version unbekannt"}</span>
-              </button>
-            ))}
-          </div>
-          {client?.custom && (
-            <p className="muted small-note">
-              Manuell hinzugefügt · <button className="link" onClick={() => removeClient(client.id)}>entfernen</button>
-            </p>
-          )}
-
-          {client && (
-            <div className={`file-status ${client.file_has_data ? "ok" : "missing"}`}>
-              <span className="status-dot" />
+      {installation && (installation.wow_dir !== null || clients.length > 0) && (
+        <>
+          <section className="card">
+            <div className="section-heading">
+              <span className="step">01</span>
               <div>
-                <strong>{client.file_has_data ? (client.from_backup ? "Sicherungskopie mit Daten bereit" : "Datei bereit") : client.file_exists ? "Noch keine neuen Daten seit dem letzten Upload" : "Noch keine Daten"}</strong>
-                <small>{client.file_path ?? "Kein Account-Verzeichnis gefunden"}</small>
-                {client.running && <small className="warning">WoW läuft – neue Daten kommen beim Ausloggen oder per /reload.</small>}
-                {client.running && unsavedHours(client) >= UNSAVED_WARNING_HOURS && (
-                  <small className="alert">
-                    Seit {Math.floor(unsavedHours(client))} h nichts gespeichert – ein Absturz würde alles seit dem letzten Speichern verlieren. Im Spiel <code>/fc save</code> eingeben.
-                  </small>
-                )}
-                {client.crash_at !== null && (
-                  <small className="alert">
-                    WoW ist um {clock(client.crash_at)} abgestürzt{client.saved_at !== null ? `, zuletzt gespeichert ${clock(client.saved_at)}` : ""} – die Daten dieser Sitzung wurden nicht mehr geschrieben.
-                  </small>
+                <h2>Game client</h2>
+                <p>Only World of Warcraft: Forever is supported. Classic, Classic Era and Retail are not supported yet.</p>
+              </div>
+              <button className="link" onClick={openAddDialog}>+ Add Forever client</button>
+            </div>
+            {clients.length === 0 && (
+              <p className="muted">No Forever client found. Add its _classic_beta_ folder or the WoW installation that contains it.</p>
+            )}
+            {clients.length > 0 && (
+              <div className="client-tabs" role={clients.length > 1 ? "tablist" : undefined} aria-label="Forever client">
+                {clients.length === 1 ? (
+                  <div className="client-tab active">
+                    <strong>{clients[0].label}</strong>
+                    <span>{clients[0].version ?? "Version unknown"}</span>
+                  </div>
+                ) : (
+                  clients.map((entry) => (
+                    <button
+                      key={entry.id}
+                      role="tab"
+                      aria-selected={entry.id === selected}
+                      className={`client-tab ${entry.id === selected ? "active" : ""}`}
+                      onClick={() => selectClient(entry.id)}
+                    >
+                      <strong>{entry.label}</strong>
+                      <span>{entry.version ?? "Version unknown"}</span>
+                    </button>
+                  ))
                 )}
               </div>
-            </div>
+            )}
+            {client && (
+              <p className="muted small-note path-note">
+                {client.id}
+                {client.custom && <> · <button className="link" onClick={() => removeClient(client.id)}>remove</button></>}
+              </p>
+            )}
+          </section>
+
+          {client && (
+            <section className="card">
+              <div className="section-heading">
+                <span className="step">02</span>
+                <div>
+                  <h2>ForeverCollect addon</h2>
+                  <p>The addon collects the data in the game. Keep it up to date so the server accepts your uploads.</p>
+                </div>
+                <button className="link" onClick={() => void checkRelease(true)}>Check for updates</button>
+              </div>
+              <div className={`addon-status ${addonState}`}>
+                <div>
+                  <strong>
+                    {client.addon_update
+                      ? `ForeverCollect v${client.addon_update} is available`
+                      : client.addon_version
+                        ? `ForeverCollect v${client.addon_version} is installed`
+                        : "ForeverCollect is not installed"}
+                  </strong>
+                  <small>
+                    {client.addon_update && client.addon_version && `Installed: v${client.addon_version} · `}
+                    {release && (
+                      <>
+                        Released {new Date(release.published_at).toLocaleDateString(LOCALE)} ·{" "}
+                        <button className="link" onClick={() => void openUrl(release.html_url)}>Release notes</button>
+                      </>
+                    )}
+                    {!release && releaseError && <span className="warning">{releaseError}</span>}
+                    {!release && !releaseError && settings && !settings.has_github_token && "No GitHub token configured – update check disabled."}
+                  </small>
+                  {installed && installed.running && <small className="warning">Installed – takes effect after your next login or /reload.</small>}
+                </div>
+                {(client.addon_update || (!client.addon_version && release)) && (
+                  <button className="secondary" onClick={installAddon} disabled={installing}>
+                    {installing ? "Installing ..." : client.addon_version ? "Update" : "Install"}
+                  </button>
+                )}
+              </div>
+              {addonError && <div className="notice error"><strong>Addon installation failed</strong><span>{addonError}</span></div>}
+            </section>
           )}
 
           {client && (
-            <div className={`addon-status ${client.addon_update ? "update" : client.addon_version ? "ok" : "missing"}`}>
-              <div>
-                <strong>
-                  {client.addon_update
-                    ? `ForeverCollect v${client.addon_update} verfügbar`
-                    : client.addon_version
-                      ? `ForeverCollect v${client.addon_version} installiert`
-                      : "ForeverCollect ist nicht installiert"}
-                </strong>
-                <small>
-                  {client.addon_update && client.addon_version && `Installiert: v${client.addon_version} · `}
-                  {release && (
-                    <>
-                      Release vom {new Date(release.published_at).toLocaleDateString("de-DE")} ·{" "}
-                      <button className="link" onClick={() => void openUrl(release.html_url)}>Release-Notes</button>
-                    </>
+            <section className="card">
+              <div className="section-heading">
+                <span className="step">03</span>
+                <div>
+                  <h2>Upload</h2>
+                  <p>{settings?.auto_upload ? "New data is uploaded automatically; you can also upload by hand." : "Automatic upload is off; upload by hand."}</p>
+                </div>
+              </div>
+              <div className={`file-status ${client.file_has_data ? "ok" : "missing"}`}>
+                <span className="status-dot" />
+                <div>
+                  <strong>
+                    {client.file_has_data
+                      ? (client.from_backup ? "Backup with data ready" : "File ready")
+                      : client.file_exists ? "No new data since the last upload" : "No data yet"}
+                  </strong>
+                  <small>{client.file_path ?? "No account folder found"}</small>
+                  {client.running && <small className="warning">WoW is running – new data arrives when you log out or type /reload.</small>}
+                  {client.running && unsavedHours(client) >= UNSAVED_WARNING_HOURS && (
+                    <small className="alert">
+                      Nothing saved for {Math.floor(unsavedHours(client))} h – a crash would lose everything since the last save. Type <code>/fc save</code> in the game.
+                    </small>
                   )}
-                  {!release && releaseError && <span className="warning">{releaseError}</span>}
-                  {!release && !releaseError && settings && !settings.has_github_token && "Kein GitHub-Token hinterlegt – Update-Prüfung deaktiviert."}
-                </small>
-                {installed && installed.running && <small className="warning">Installiert – wirkt nach dem nächsten Einloggen bzw. /reload.</small>}
+                  {client.crash_at !== null && (
+                    <small className="alert">
+                      WoW crashed at {clock(client.crash_at)}{client.saved_at !== null ? `, last saved at ${clock(client.saved_at)}` : ""} – the data of that session was not written.
+                    </small>
+                  )}
+                </div>
               </div>
-              {(client.addon_update || (!client.addon_version && release)) && (
-                <button className="secondary" onClick={installAddon} disabled={installing}>
-                  {installing ? "Installiere ..." : client.addon_version ? "Aktualisieren" : "Installieren"}
-                </button>
-              )}
-            </div>
-          )}
 
-          <button className="primary" onClick={upload} disabled={busy || !client?.file_has_data}>
-            {busy ? "Upload läuft ..." : "Jetzt hochladen"}<span>→</span>
-          </button>
-        </section>
+              <button className="primary" onClick={upload} disabled={busy || !client.file_has_data}>
+                {busy ? "Uploading ..." : "Upload now"}<span>→</span>
+              </button>
+
+              {uploadError && <div className="notice error"><strong>Upload not possible</strong><span>{uploadError}</span></div>}
+              {result && (
+                <div className={`notice ${importFor(result)?.status === "failed" ? "error" : "success"}`}>
+                  <strong>{importTitle(importFor(result))}</strong>
+                  <span>{result.import_id ? `Import ID: ${result.import_id}` : "The server accepted the upload."}</span>
+                  {importFor(result)?.status === "failed" && <span>{importFor(result)?.error ?? "The server gave no reason."}</span>}
+                  <small>{result.deleted ? "The file was removed; the next session starts empty." : "WoW is still running: the file stays and is checked again on the next write."}</small>
+                </div>
+              )}
+            </section>
+          )}
+        </>
       )}
 
       {log.length > 0 && (
         <section className="card activity">
-          <div className="section-heading"><div><h2>Aktivität</h2><p>Automatische Uploads dieser Sitzung.</p></div></div>
+          <div className="section-heading"><div><h2>Activity</h2><p>Uploads and addon checks of this session.</p></div></div>
           <ul>
             {log.map((entry) => (
               <li key={entry.id} className={entry.kind}>
@@ -363,46 +439,39 @@ function App() {
         </section>
       )}
 
-      {error && <div className="notice error"><strong>Upload nicht möglich</strong><span>{error}</span></div>}
-      {result && (
-        <div className={`notice ${importFor(result)?.status === "failed" ? "error" : "success"}`}>
-          <strong>{importTitle(importFor(result))}</strong>
-          <span>{result.import_id ? `Import-ID: ${result.import_id}` : "Der Server hat den Upload angenommen."}</span>
-          {importFor(result)?.status === "failed" && <span>{importFor(result)?.error ?? "Der Server hat keinen Grund genannt."}</span>}
-          <small>{result.deleted ? "Datei wurde entfernt, die nächste Sitzung startet leer." : "WoW läuft noch: Die Datei bleibt erhalten und wird beim nächsten Schreiben erneut geprüft."}</small>
-        </div>
-      )}
+      {error && <div className="notice error"><strong>Something went wrong</strong><span>{error}</span></div>}
+
       {dialog && (
         <div className="backdrop" onClick={() => setDialog(null)}>
           <div className="dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
             <div className="section-heading">
               <div>
-                <h2>Client hinzufügen</h2>
-                <p>Weitere Clients der gefundenen Installationen – oder per Ordnerwahl eine ganze WoW-Installation („World of Warcraft“) bzw. ein einzelner Client-Ordner.</p>
+                <h2>Add Forever client</h2>
+                <p>Forever clients of the installations found, or choose a WoW installation ("World of Warcraft") or its _classic_beta_ folder yourself.</p>
               </div>
             </div>
-            {dialog.candidates.length === 0 && <p className="muted">Keine weiteren Client-Ordner in den bekannten Installationen gefunden.</p>}
+            {dialog.candidates.length === 0 && <p className="muted">No further Forever clients found in the known installations.</p>}
             <ul className="candidates">
               {dialog.candidates.map((candidate) => (
                 <li key={candidate.id}>
                   <div>
                     <strong>{candidate.label}</strong>
-                    <span>{candidate.version ?? "nicht im Launcher installiert"}{candidate.has_data ? " · Daten vorhanden" : ""}</span>
+                    <span>{candidate.version ?? "not installed in the launcher"}{candidate.has_data ? " · has data" : ""}</span>
                     <small>{candidate.id}</small>
                   </div>
-                  <button className="secondary" onClick={() => addClient(candidate.id)}>Hinzufügen</button>
+                  <button className="secondary" onClick={() => addClient(candidate.id)}>Add</button>
                 </li>
               ))}
             </ul>
             {dialog.error && <div className="notice error"><span>{dialog.error}</span></div>}
             <div className="dialog-actions">
-              <button className="secondary" onClick={chooseFolder}>Installation oder Ordner wählen …</button>
-              <button className="link" onClick={() => setDialog(null)}>Schließen</button>
+              <button className="secondary" onClick={chooseFolder}>Choose folder …</button>
+              <button className="link" onClick={() => setDialog(null)}>Close</button>
             </div>
           </div>
         </div>
       )}
-      <footer>ForeverDB Client <span>·</span> {settings?.auto_upload ? "Überwachung aktiv" : "Überwachung aus"} <span>·</span> <button className="link" onClick={() => void checkRelease(true)}>Nach Addon-Updates suchen</button></footer>
+      <footer>ForeverDB Client <span>·</span> {settings?.auto_upload ? "Watching for new data" : "Not watching"}</footer>
     </main>
   );
 }

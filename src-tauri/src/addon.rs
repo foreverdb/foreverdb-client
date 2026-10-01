@@ -111,22 +111,22 @@ fn github_client(token: &str) -> Result<reqwest::Client, String> {
     headers.insert(
         reqwest::header::AUTHORIZATION,
         auth.parse()
-            .map_err(|_| "Token enthält ungültige Zeichen.".to_string())?,
+            .map_err(|_| "The token contains invalid characters.".to_string())?,
     );
     headers.insert("X-GitHub-Api-Version", "2022-11-28".parse().unwrap());
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .default_headers(headers)
         .build()
-        .map_err(|e| format!("HTTP-Client konnte nicht erstellt werden: {e}"))
+        .map_err(|e| format!("Could not create the HTTP client: {e}"))
 }
 
 fn explain_status(status: reqwest::StatusCode, what: &str) -> String {
     match status.as_u16() {
-        401 => "GitHub-Token ungültig oder abgelaufen.".to_string(),
-        403 => "GitHub-Token hat keinen Zugriff auf das Addon-Repository (Berechtigung Contents: Read nötig).".to_string(),
-        404 => format!("{what} nicht gefunden (Repository oder Release fehlt, oder das Token hat keinen Zugriff)."),
-        _ => format!("GitHub antwortete mit {status} für {what}."),
+        401 => "The GitHub token is invalid or expired.".to_string(),
+        403 => "The GitHub token has no access to the addon repository (needs the Contents: Read permission).".to_string(),
+        404 => format!("Could not find {what} (the repository or release is missing, or the token has no access)."),
+        _ => format!("GitHub answered {status} for {what}."),
     }
 }
 
@@ -142,7 +142,7 @@ pub async fn fetch_latest_release(token: &str) -> Result<AddonRelease, String> {
         .await
         .map_err(|e| format!("Release-Abfrage fehlgeschlagen: {e}"))?;
     if !response.status().is_success() {
-        return Err(explain_status(response.status(), "das neueste Release"));
+        return Err(explain_status(response.status(), "the latest release"));
     }
     let release: GithubRelease = response
         .json()
@@ -154,7 +154,7 @@ pub async fn fetch_latest_release(token: &str) -> Result<AddonRelease, String> {
         .find(|asset| asset.name.starts_with(ADDON_FOLDER) && asset.name.ends_with(".zip"))
         .ok_or_else(|| {
             format!(
-                "Release {} enthält kein {ADDON_FOLDER}-Zip.",
+                "Release {} contains no {ADDON_FOLDER} zip.",
                 release.tag_name
             )
         })?;
@@ -181,7 +181,7 @@ pub async fn download_asset(token: &str, release: &AddonRelease) -> Result<Vec<u
         .await
         .map_err(|e| format!("Download fehlgeschlagen: {e}"))?;
     if !response.status().is_success() {
-        return Err(explain_status(response.status(), "das Addon-Zip"));
+        return Err(explain_status(response.status(), "the addon zip"));
     }
     let bytes = response
         .bytes()
@@ -189,7 +189,7 @@ pub async fn download_asset(token: &str, release: &AddonRelease) -> Result<Vec<u
         .map_err(|e| format!("Download abgebrochen: {e}"))?;
     if release.asset_size > 0 && bytes.len() as u64 != release.asset_size {
         return Err(format!(
-            "Download unvollständig ({} von {} Bytes).",
+            "Incomplete download ({} of {} bytes).",
             bytes.len(),
             release.asset_size
         ));
@@ -216,7 +216,7 @@ pub fn extract_addon(
         let name = entry.name().to_string();
         let Some(relative) = name.strip_prefix(&prefix) else {
             return Err(format!(
-                "Unerwarteter Zip-Eintrag außerhalb von {prefix}: {name}"
+                "Unexpected zip entry outside {prefix}: {name}"
             ));
         };
         if relative.is_empty() || entry.is_dir() {
@@ -237,7 +237,7 @@ pub fn extract_addon(
             let found = toc_version(&String::from_utf8_lossy(&content));
             if found.as_deref() != Some(expected_version) {
                 return Err(format!(
-                    "Zip enthält Version {}, erwartet wurde {expected_version}.",
+                    "The zip contains version {}, expected {expected_version}.",
                     found.unwrap_or_else(|| "?".to_string())
                 ));
             }
@@ -246,13 +246,13 @@ pub fn extract_addon(
         let destination = target.join(relative_path);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)
-                .map_err(|e| format!("Ordner {} nicht anlegbar: {e}", parent.display()))?;
+                .map_err(|e| format!("Cannot create folder {}: {e}", parent.display()))?;
         }
         fs::write(&destination, content)
-            .map_err(|e| format!("Datei {} nicht schreibbar: {e}", destination.display()))?;
+            .map_err(|e| format!("Cannot write file {}: {e}", destination.display()))?;
     }
     if !saw_toc {
-        return Err("Zip enthält keine ForeverCollect.toc.".to_string());
+        return Err("The zip contains no ForeverCollect.toc.".to_string());
     }
     Ok(())
 }
@@ -283,7 +283,7 @@ pub fn install_from_zip(
     expected_version: &str,
 ) -> Result<(), String> {
     let addons = client_dir.join("Interface").join("AddOns");
-    fs::create_dir_all(&addons).map_err(|e| format!("AddOns-Ordner nicht anlegbar: {e}"))?;
+    fs::create_dir_all(&addons).map_err(|e| format!("Cannot create the AddOns folder: {e}"))?;
     let target = addon_dir(client_dir);
     let staging = addons.join(format!("{ADDON_FOLDER}.new"));
     let backup = addons.join(format!("{ADDON_FOLDER}.old"));
@@ -297,14 +297,14 @@ pub fn install_from_zip(
     let had_previous = target.is_dir();
     if had_previous {
         rename_with_retry(&target, &backup)
-            .map_err(|e| format!("Bisheriges Addon nicht verschiebbar: {e}"))?;
+            .map_err(|e| format!("Cannot move the previous addon aside: {e}"))?;
     }
     if let Err(error) = rename_with_retry(&staging, &target) {
         if had_previous {
             let _ = rename_with_retry(&backup, &target);
         }
         let _ = fs::remove_dir_all(&staging);
-        return Err(format!("Neues Addon nicht installierbar: {error}"));
+        return Err(format!("Cannot install the new addon: {error}"));
     }
     let _ = fs::remove_dir_all(&backup);
     Ok(())

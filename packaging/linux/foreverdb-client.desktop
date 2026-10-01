@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=ForeverDB Client
-Comment=Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch
+Comment=Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB
 Exec=foreverdb-client
 Icon=foreverdb-client
 Terminal=false

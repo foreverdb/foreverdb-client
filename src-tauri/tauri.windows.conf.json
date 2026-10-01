@@ -4,7 +4,7 @@
     "targets": ["nsis"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
-      "nsis": { "installMode": "currentUser", "languages": ["German", "English"] }
+      "nsis": { "installMode": "currentUser", "languages": ["English"] }
     }
   }
 }

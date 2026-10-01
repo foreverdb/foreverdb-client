@@ -9,17 +9,17 @@ button { cursor: pointer; }
 .masthead { display: flex; align-items: center; gap: 18px; border-bottom: 1px solid #30353a; padding-bottom: 34px; }
 .mark { display: grid; place-items: center; width: 54px; height: 54px; border: 1px solid #b5d46a; border-radius: 15px; color: #b5d46a; font: 500 19px 'DM Mono', monospace; letter-spacing: -2px; }
 .mark span { color: #e9edf3; }
-.eyebrow, .muted, small, .client-tabs span, footer { color: #7f8992; font: 12px 'DM Mono', monospace; }
+.eyebrow, .muted, small, .client-tab span, footer { color: #7f8992; font: 12px 'DM Mono', monospace; }
 .eyebrow { margin: 0 0 8px; text-transform: uppercase; letter-spacing: .08em; }
 h1 { margin: 0; font-size: clamp(25px, 5vw, 39px); line-height: 1.1; letter-spacing: -.04em; }
 .intro { padding: 34px 0 25px; }
 .intro > p { max-width: 520px; margin: 0; color: #aeb6bf; line-height: 1.7; font-size: 14px; }
 .client-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
-.client-tabs button { text-align: left; padding: 12px 15px; background: #181d21; border: 1px solid #30373d; color: #e9edf3; border-radius: 9px; min-width: 125px; }
-.client-tabs button.active { border-color: #b5d46a; background: #20291d; }
-.client-tabs strong, .client-tabs span { display: block; }
-.client-tabs strong { font-size: 13px; margin-bottom: 5px; }
-.client-tabs span { font-size: 10px; }
+.client-tab { text-align: left; padding: 12px 15px; background: #181d21; border: 1px solid #30373d; color: #e9edf3; border-radius: 9px; min-width: 125px; }
+.client-tab.active { border-color: #b5d46a; background: #20291d; }
+.client-tab strong, .client-tab span { display: block; }
+.client-tab strong { font-size: 13px; margin-bottom: 5px; }
+.client-tab span { font-size: 10px; }
 .card { border: 1px solid #30373d; background: rgba(24, 29, 33, .84); border-radius: 13px; padding: 25px; margin-top: 14px; }
 .section-heading { display: flex; gap: 15px; margin-bottom: 23px; align-items: flex-start; }
 .section-heading > div { flex: 1; min-width: 0; }
@@ -49,7 +49,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .notice span, .notice small { color: #aeb9a1; }
 .notice.error span { color: #e6aaa0; }
 footer { text-align: center; margin-top: 38px; } footer span { padding: 0 6px; color: #b5d46a; }
-@media (max-width: 650px) { .shell { padding: 30px 18px; } .intro { flex-direction: column; gap: 22px; } .client-tabs { width: 100%; } .client-tabs button { flex: 1; } .card { padding: 19px; } }
+@media (max-width: 650px) { .shell { padding: 30px 18px; } .intro { flex-direction: column; gap: 22px; } .client-tabs { width: 100%; } .client-tab { flex: 1; } .card { padding: 19px; } }
 
 .paths { margin: 8px 0 0; padding-left: 18px; font: 11px 'DM Mono', monospace; color: #aeb6bf; }
 .paths li { margin: 3px 0; word-break: break-all; }
@@ -74,6 +74,8 @@ footer { text-align: center; margin-top: 38px; } footer span { padding: 0 6px; c
 .link { background: none; border: 0; padding: 0; color: #b5d46a; font: 600 12px Manrope, sans-serif; }
 .link:hover { text-decoration: underline; }
 .small-note { margin: 10px 0 0; }
+.path-note { word-break: break-all; }
+.addon-status .warning { color: #e1aa6e; }
 .backdrop { position: fixed; inset: 0; background: rgba(6, 8, 10, .72); display: grid; place-items: center; padding: 24px; z-index: 10; }
 .dialog { width: min(640px, 100%); max-height: 90vh; overflow: auto; background: #181d21; border: 1px solid #3b444b; border-radius: 13px; padding: 25px; }
 .candidates { list-style: none; margin: 0; padding: 0; }
@@ -87,7 +89,7 @@ footer { text-align: center; margin-top: 38px; } footer span { padding: 0 6px; c
 .dialog-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }
 .dialog-actions .secondary { margin: 0; }
 
-.addon-status { display: flex; align-items: center; gap: 14px; padding: 13px; margin-top: 12px; border-radius: 6px; border: 1px solid #30373d; background: #14181c; }
+.addon-status { display: flex; align-items: center; gap: 14px; padding: 13px; border-radius: 6px; border: 1px solid #30373d; background: #14181c; }
 .addon-status > div { flex: 1; min-width: 0; }
 .addon-status strong, .addon-status small { display: block; }
 .addon-status small { margin-top: 3px; }

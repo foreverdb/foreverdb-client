@@ -6,5 +6,5 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 
-# GitHub-Token für Addon-Updates, wird beim Build einkompiliert (siehe README)
+# GitHub token for addon updates, compiled in at build time (see README)
 /github-token

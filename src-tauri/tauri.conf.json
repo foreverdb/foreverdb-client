@@ -31,8 +31,8 @@
     "homepage": "https://github.com/foreverdb/foreverdb",
     "license": "MIT",
     "licenseFile": "../LICENSE",
-    "shortDescription": "Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch",
-    "longDescription": "Desktop-Uploader für die SavedVariables des ForeverCollect-Addons. Erkennt WoW-Installationen (Wine, Lutris, Faugus, Bottles, Windows), überwacht die ForeverCollect.lua jedes Clients und lädt jede neue Schreibung automatisch zum ForeverDB-Ingress hoch; von jedem Upload bleibt eine Archivkopie.",
+    "shortDescription": "Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB",
+    "longDescription": "Desktop uploader for the SavedVariables of the ForeverCollect addon. Detects the World of Warcraft: Forever client (Wine, Lutris, Faugus, Bottles, Windows), watches its ForeverCollect.lua and uploads every new write to the ForeverDB ingress automatically; every upload keeps an archive copy. Classic, Classic Era and Retail are not supported yet.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

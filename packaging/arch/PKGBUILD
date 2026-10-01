@@ -1,12 +1,12 @@
 # Maintainer: Alex Bangert
-# Baut aus dem Checkout, in dem diese Datei liegt (kein Download):
+# Builds from the checkout this file lives in (no download):
 #   cd packaging/arch && makepkg -si
-# FOREVERDB_GITHUB_TOKEN in der Umgebung bzw. src-tauri/github-token wird beim Build einkompiliert (Addon-Updates).
-# pkgver mit package.json, src-tauri/Cargo.toml und src-tauri/tauri.conf.json gleich halten.
+# FOREVERDB_GITHUB_TOKEN from the environment or src-tauri/github-token is compiled in at build time (addon updates).
+# Keep pkgver in sync with package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json.
 pkgname=foreverdb-client
 pkgver=0.2.0
 pkgrel=1
-pkgdesc="Lädt ForeverCollect-SavedVariables aus World of Warcraft zu ForeverDB hoch"
+pkgdesc="Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB"
 arch=('x86_64')
 url="https://github.com/foreverdb/foreverdb"
 license=('MIT')

@@ -19,9 +19,25 @@ use addon::AddonRelease;
 // "_classic_beta_": its ".flavor.info" names the product, the "Wow*.exe" in it
 // the process to watch, and the launcher's ".build.info" the installed version.
 
-const DEFAULT_TARGET_URL: &str = "https://foreverdb.docker.alexbangert.dev/imports/forevercollect";
+const DEFAULT_TARGET_URL: &str = "https://foreverdb-ingress.kube.alexbangert.dev/imports/forevercollect";
 
-/// Human labels for Blizzard's product codes; unknown products show the code.
+/// The only product the client works with: Forever runs in the "_classic_beta_" folder.
+/// Classic, Classic Era and Retail are not supported yet.
+const SUPPORTED_PRODUCT: &str = "wow_classic_beta";
+
+fn is_supported(def: &ClientDef) -> bool {
+    def.product == SUPPORTED_PRODUCT
+}
+
+fn unsupported_message(def: &ClientDef) -> String {
+    format!(
+        "'{}' is a {} client. Only Forever is supported; Classic, Classic Era and Retail are not supported yet.",
+        def.id, def.label
+    )
+}
+
+/// Human labels for Blizzard's product codes; unknown products show the code. The
+/// other flavours stay listed so a rejection can name what the user picked.
 fn product_label(product: &str) -> String {
     match product {
         "wow_classic_beta" => "Forever",
@@ -128,6 +144,19 @@ struct Settings {
     /// and the value compiled in at build time). Never handed to the window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     github_token: Option<String>,
+    /// Random ID created on the first start and kept from then on. Sent with every
+    /// upload (`X-ForeverDB-User`) so the server can block a user and delete their data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+}
+
+/// Creates the user ID if the settings have none yet; returns whether it did.
+fn ensure_user_id(settings: &mut Settings) -> bool {
+    if settings.user_id.is_some() {
+        return false;
+    }
+    settings.user_id = Some(uuid::Uuid::new_v4().to_string());
+    true
 }
 
 /// What the window may see of the settings.
@@ -225,6 +254,18 @@ impl AppState {
             }
         }
         settings.clone()
+    }
+
+    /// The user ID sent with every upload; created here if the settings still lack one.
+    fn user_id(&self) -> String {
+        if let Some(id) = self.snapshot().user_id {
+            return id;
+        }
+        self.update(|settings| {
+            ensure_user_id(settings);
+        })
+        .user_id
+        .expect("ensure_user_id sets the ID")
     }
 
     fn snapshot(&self) -> Settings {
@@ -791,7 +832,7 @@ fn clients_among(
             .iter()
             .any(|entry| Path::new(entry) == root.as_path());
         for dir in flavour_dirs(root) {
-            let Some(def) = client_from_dir(&dir) else {
+            let Some(def) = client_from_dir(&dir).filter(is_supported) else {
                 continue;
             };
             let Some(version) = versions.get(&def.product).cloned() else {
@@ -812,7 +853,9 @@ fn clients_among(
         if seen.contains(extra) {
             continue;
         }
-        let Some(def) = client_from_dir(Path::new(extra)) else {
+        // Entries from before the client was limited to Forever stay in the settings
+        // but are ignored.
+        let Some(def) = client_from_dir(Path::new(extra)).filter(is_supported) else {
             continue;
         };
         let version = client_version(&def);
@@ -839,8 +882,8 @@ fn detect_installation(state: tauri::State<'_, AppState>) -> Installation {
     }
 }
 
-/// Flavour folders that are not active yet: the other flavours of the detected
-/// installation and of any other installation found in the candidate directories.
+/// Forever folders that are not active yet, from the detected installation and any
+/// other installation found in the candidate directories.
 #[tauri::command]
 fn list_client_candidates(state: tauri::State<'_, AppState>) -> Vec<ClientCandidate> {
     let settings = state.snapshot();
@@ -854,7 +897,7 @@ fn list_client_candidates(state: tauri::State<'_, AppState>) -> Vec<ClientCandid
     {
         let versions = read_build_info(&root);
         for dir in flavour_dirs(&root) {
-            let Some(def) = client_from_dir(&dir) else {
+            let Some(def) = client_from_dir(&dir).filter(is_supported) else {
                 continue;
             };
             if active_ids.contains(&def.id) || !seen.insert(def.id.clone()) {
@@ -872,26 +915,34 @@ fn list_client_candidates(state: tauri::State<'_, AppState>) -> Vec<ClientCandid
     candidates
 }
 
-/// Adds a folder chosen by the user: a flavour folder becomes an extra client, a WoW
-/// installation folder ("World of Warcraft", holding .build.info or flavour folders)
-/// becomes an extra installation whose installed clients are active from then on.
-/// Registers a folder chosen by the user: a flavour folder becomes an extra client, a
+/// Registers a folder chosen by the user: a Forever folder becomes an extra client, a
 /// WoW installation folder ("World of Warcraft", holding .build.info or flavour
-/// folders) an extra installation whose installed clients are active from then on.
+/// folders) an extra installation whose installed Forever client is active from then
+/// on. Folders of other flavours are rejected.
 fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, String> {
     if let Some(def) = client_from_dir(path) {
+        if !is_supported(&def) {
+            return Err(unsupported_message(&def));
+        }
         if !settings.extra_clients.contains(&def.id) {
             settings.extra_clients.push(def.id.clone());
         }
         return Ok(def.id);
     }
-    let flavours: Vec<PathBuf> = flavour_dirs(path)
-        .into_iter()
-        .filter(|dir| client_from_dir(dir).is_some())
+    let flavours: Vec<ClientDef> = flavour_dirs(path)
+        .iter()
+        .filter_map(|dir| client_from_dir(dir))
         .collect();
     if !is_wow_dir(path) && flavours.is_empty() {
         return Err(format!(
-            "'{}' ist weder ein WoW-Installationsordner (mit .build.info oder Ordnern wie _classic_era_) noch ein Client-Ordner (mit .flavor.info und Wow*.exe).",
+            "'{}' is neither a WoW installation folder (with .build.info or folders such as _classic_beta_) nor a client folder (with .flavor.info and Wow*.exe).",
+            path.display()
+        ));
+    }
+    let forever: Vec<ClientDef> = flavours.into_iter().filter(is_supported).collect();
+    if forever.is_empty() {
+        return Err(format!(
+            "'{}' contains no Forever client (_classic_beta_). Only Forever is supported; Classic, Classic Era and Retail are not supported yet.",
             path.display()
         ));
     }
@@ -901,7 +952,7 @@ fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, Strin
     }
     // Without a launcher file nothing counts as installed, so activate the flavours themselves.
     if !is_wow_dir(path) {
-        for def in flavours.iter().filter_map(|dir| client_from_dir(dir)) {
+        for def in forever {
             if !settings.extra_clients.contains(&def.id) {
                 settings.extra_clients.push(def.id);
             }
@@ -960,14 +1011,17 @@ fn remove_client(state: tauri::State<'_, AppState>, id: String) -> SettingsView 
 fn client_by_id(settings: &Settings, id: &str) -> Result<ClientDef, String> {
     let (_, _, active) = active_clients(settings, None);
     if !active.iter().any(|client| client.id == id) {
-        return Err(format!("Client '{id}' ist nicht aktiv."));
+        return Err(format!("Client '{id}' is not active."));
     }
     client_from_dir(Path::new(id))
-        .ok_or_else(|| format!("Client-Ordner '{id}' ist nicht mehr lesbar."))
+        .ok_or_else(|| format!("Client folder '{id}' can no longer be read."))
 }
 
-/// Kennzeichnet den Upload gegenüber dem Ingress; landet dort in `import_jobs.source`,
-/// sodass eine Parser-Regression einem Client-Release zuzuordnen ist.
+/// Carries the user ID with every upload, so an admin can block a user and delete their data.
+const USER_HEADER: &str = "X-ForeverDB-User";
+
+/// Identifies the upload to the ingress; it ends up in `import_jobs.source`, so a
+/// parser regression can be traced to a client release.
 const CLIENT_TAG: &str = concat!("foreverdb-client/", env!("CARGO_PKG_VERSION"));
 
 fn gzip(payload: &[u8]) -> Result<Vec<u8>, std::io::Error> {
@@ -976,17 +1030,17 @@ fn gzip(payload: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     encoder.finish()
 }
 
-/// Ob eine Ablehnung sich mit demselben Inhalt wiederholen würde. 408 und 429 sind
-/// Aufforderungen, es später erneut zu versuchen, und zählen deshalb nicht dazu.
+/// Whether a rejection would repeat itself with the same content. 408 and 429 ask to
+/// try again later and therefore do not count.
 fn is_permanent_rejection(status: reqwest::StatusCode) -> bool {
     status.is_client_error()
         && status != reqwest::StatusCode::REQUEST_TIMEOUT
         && status != reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
-/// Merkt sich den Inhalt als abgehandelt, damit der Watcher ihn nicht erneut anfasst.
-/// `secured` unterscheidet einen echten Upload von einer dauerhaften Ablehnung: nur
-/// ersterer verschiebt den Zeitpunkt, ab dem die Datei als gesichert gilt.
+/// Remembers the content as handled so the watcher does not touch it again. `secured`
+/// tells a real upload from a permanent rejection: only the former moves the point in
+/// time from which the file counts as secured.
 fn remember_upload(state: &AppState, client_id: &str, content_hash: u64, secured: bool) {
     state.update(|settings| {
         settings
@@ -1007,57 +1061,59 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let client_dir = Path::new(&def.id);
     let main_path = saved_variables_path(client_dir).ok_or_else(|| {
         format!(
-            "Kein Account-Verzeichnis unter '{}' gefunden.",
+            "No account folder found under '{}'.",
             client_dir.join("WTF").join("Account").display()
         )
     })?;
     let source = snapshot_source(client_dir).ok_or_else(|| {
         if main_path.is_file() {
-            "Die Datei enthält noch keine gesammelten Daten (leere Datenbank nach dem letzten Upload).".to_string()
+            "The file holds no collected data yet (empty database since the last upload).".to_string()
         } else {
-            format!("Keine ForeverCollect.lua gefunden: {}", main_path.display())
+            format!("No ForeverCollect.lua found: {}", main_path.display())
         }
     })?;
     let content =
-        fs::read(&source.path).map_err(|e| format!("Datei kann nicht gelesen werden: {e}"))?;
+        fs::read(&source.path).map_err(|e| format!("Cannot read the file: {e}"))?;
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
     let content_hash = hasher.finish();
 
-    // Der Server bekommt nur noch JSON. Scheitert die Umwandlung, ist der Snapshot
-    // selbst kaputt oder zu neu: archivieren, als erledigt vormerken (sonst versucht
-    // der Watcher es alle paar Sekunden erneut) und die Datei liegen lassen.
+    // The server only accepts JSON. If the conversion fails, the snapshot itself is
+    // broken or too new: archive it, mark it as handled (otherwise the watcher retries
+    // every few seconds) and leave the file in place.
     let snapshot = match lua::parse_forever_collect(&content) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             archive_snapshot(&state.archive_dir, &def.label, None, &content);
             remember_upload(state, client_id, content_hash, false);
-            return Err(format!("Snapshot konnte nicht gelesen werden: {error}"));
+            return Err(format!("Could not read the snapshot: {error}"));
         }
     };
     let payload = serde_json::to_vec(&snapshot)
-        .map_err(|e| format!("Snapshot konnte nicht als JSON kodiert werden: {e}"))?;
-    let compressed = gzip(&payload).map_err(|e| format!("Upload konnte nicht vorbereitet werden: {e}"))?;
+        .map_err(|e| format!("Could not encode the snapshot as JSON: {e}"))?;
+    let compressed = gzip(&payload).map_err(|e| format!("Could not prepare the upload: {e}"))?;
 
+    let user_id = state.user_id();
     let response = reqwest::Client::new()
         .post(target_url())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(reqwest::header::CONTENT_ENCODING, "gzip")
         .header("X-ForeverDB-Client", CLIENT_TAG)
+        .header(USER_HEADER, user_id)
         .body(compressed)
         .send()
         .await
-        .map_err(|e| format!("Upload fehlgeschlagen: {e}"))?;
+        .map_err(|e| format!("Upload failed: {e}"))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        // Eine dauerhafte Ablehnung wiederholt sich mit demselben Inhalt immer gleich.
+        // A permanent rejection always repeats itself for the same content.
         if is_permanent_rejection(status) {
             archive_snapshot(&state.archive_dir, &def.label, None, &content);
             remember_upload(state, client_id, content_hash, false);
         }
         return Err(format!(
-            "Server lehnte den Upload ab ({}): {}",
+            "The server rejected the upload ({}): {}",
             status,
             body.trim()
         ));
@@ -1166,7 +1222,7 @@ async fn latest_release(state: &AppState, force: bool) -> Result<AddonRelease, S
         }
     }
     let token = addon::github_token(state.snapshot().github_token.as_deref())
-        .ok_or_else(|| "Kein GitHub-Token für Addon-Updates hinterlegt.".to_string())?;
+        .ok_or_else(|| "No GitHub token configured for addon updates.".to_string())?;
     let result = addon::fetch_latest_release(&token).await;
     *state.release.lock().unwrap() = Some(ReleaseCache {
         checked_at: std::time::Instant::now(),
@@ -1198,7 +1254,7 @@ async fn install_addon(
     let def = client_by_id(&state.snapshot(), &client)?;
     let release = latest_release(&state, false).await?;
     let token = addon::github_token(state.snapshot().github_token.as_deref())
-        .ok_or_else(|| "Kein GitHub-Token für Addon-Updates hinterlegt.".to_string())?;
+        .ok_or_else(|| "No GitHub token configured for addon updates.".to_string())?;
     let zip_bytes = addon::download_asset(&token, &release).await?;
     let client_dir = PathBuf::from(&def.id);
     let version = release.version.clone();
@@ -1248,7 +1304,7 @@ async fn watch_releases(app: AppHandle) {
                         "",
                         "update",
                         format!(
-                            "ForeverCollect v{} verfügbar (installiert: {}).",
+                            "ForeverCollect v{} is available (outdated in: {}).",
                             release.version,
                             outdated.join(", ")
                         ),
@@ -1260,7 +1316,7 @@ async fn watch_releases(app: AppHandle) {
                 &app,
                 "",
                 "error",
-                format!("Addon-Update-Prüfung: {error}"),
+                format!("Addon update check: {error}"),
                 None,
             ),
         }
@@ -1319,7 +1375,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
                     ImportStatus {
                         import_id,
                         status: "failed".into(),
-                        error: Some("Der Server kennt diesen Import nicht mehr.".into()),
+                        error: Some("The server no longer knows this import.".into()),
                     },
                 );
                 return;
@@ -1329,7 +1385,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
         let Some(json) = json else {
             failures += 1;
             if failures >= POLL_MAX_FAILURES {
-                emit_activity(&app, &client_id, "error", format!("Import-Status von {import_id} ist nicht abrufbar; bitte später erneut prüfen."), None);
+                emit_activity(&app, &client_id, "error", format!("Cannot fetch the status of import {import_id}; please check again later."), None);
                 return;
             }
             continue;
@@ -1365,7 +1421,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
                 &client_id,
                 "error",
                 format!(
-                    "Import {import_id} ist nach {} Minuten noch nicht abgeschlossen.",
+                    "Import {import_id} has not finished after {} minutes.",
                     POLL_TIMEOUT.as_secs() / 60
                 ),
                 None,
@@ -1379,23 +1435,23 @@ fn emit_import(app: &AppHandle, client: &str, import: ImportStatus) {
     let (kind, message) = match import.status.as_str() {
         "processing" => (
             "processing",
-            format!("Import {} wird verarbeitet.", import.import_id),
+            format!("Import {} is being processed.", import.import_id),
         ),
         "completed" => (
             "completed",
-            format!("Import {} abgeschlossen.", import.import_id),
+            format!("Import {} completed.", import.import_id),
         ),
         "failed" => (
             "failed",
             format!(
-                "Import {} fehlgeschlagen: {}",
+                "Import {} failed: {}",
                 import.import_id,
-                import.error.as_deref().unwrap_or("unbekannter Fehler")
+                import.error.as_deref().unwrap_or("unknown error")
             ),
         ),
         _ => (
             "pending",
-            format!("Import {} wartet in der Warteschlange.", import.import_id),
+            format!("Import {} is waiting in the queue.", import.import_id),
         ),
     };
     let _ = app.emit(
@@ -1469,7 +1525,7 @@ async fn watch_and_upload(app: AppHandle) {
                             &client.id,
                             "cleaned",
                             format!(
-                                "{}: hochgeladene Daten nach Spielende gelöscht.",
+                                "{}: uploaded data deleted after the game closed.",
                                 client.label
                             ),
                             None,
@@ -1486,9 +1542,9 @@ async fn watch_and_upload(app: AppHandle) {
                 &client.id,
                 "pending",
                 if client.from_backup {
-                    format!("{}: Sicherungskopie mit nicht hochgeladenen Daten gefunden, Upload startet.", client.label)
+                    format!("{}: found a backup with data not yet uploaded, starting upload.", client.label)
                 } else {
-                    format!("{}: neue Daten geschrieben, Upload startet.", client.label)
+                    format!("{}: new data written, starting upload.", client.label)
                 },
                 None,
             );
@@ -1500,8 +1556,8 @@ async fn watch_and_upload(app: AppHandle) {
                         &client.id,
                         "uploaded",
                         match &result.import_id {
-                            Some(id) => format!("Upload erfolgreich (Import-ID {id})."),
-                            None => "Upload erfolgreich.".to_string(),
+                            Some(id) => format!("Upload succeeded (import ID {id})."),
+                            None => "Upload succeeded.".to_string(),
                         },
                         Some(result),
                     )
@@ -1534,7 +1590,13 @@ pub fn run() {
                 .app_data_dir()
                 .map(|dir| dir.join("archive"))
                 .unwrap_or_else(|_| PathBuf::from("foreverdb-client-archive"));
-            app.manage(AppState::load(settings_path, archive_dir));
+            let state = AppState::load(settings_path, archive_dir);
+            if state.snapshot().user_id.is_none() {
+                state.update(|settings| {
+                    ensure_user_id(settings);
+                });
+            }
+            app.manage(state);
             tauri::async_runtime::spawn(watch_and_upload(app.handle().clone()));
             tauri::async_runtime::spawn(watch_releases(app.handle().clone()));
             Ok(())
@@ -1694,23 +1756,32 @@ mod tests {
         let era = fake_flavour(&root, "_classic_era_", "wow_classic_era", "WowClassic.exe");
         let beta = fake_flavour(&root, "_classic_beta_", "wow_classic_beta", "WowB.exe");
 
-        // a flavour folder becomes an extra client
+        // a Forever folder becomes an extra client
         let mut settings = Settings::default();
-        register_folder(&mut settings, &era).unwrap();
+        register_folder(&mut settings, &beta).unwrap();
         assert_eq!(
             settings.extra_clients,
-            vec![era.to_string_lossy().into_owned()]
+            vec![beta.to_string_lossy().into_owned()]
         );
         assert!(settings.extra_installations.is_empty());
 
-        // an installation without launcher file activates all its flavours
+        // other flavours are rejected
+        let mut settings = Settings::default();
+        let error = register_folder(&mut settings, &era).unwrap_err();
+        assert!(error.contains("Only Forever is supported"), "{error}");
+        assert!(settings.extra_clients.is_empty());
+
+        // an installation without launcher file activates only its Forever folder
         let mut settings = Settings::default();
         register_folder(&mut settings, &root).unwrap();
         assert_eq!(
             settings.extra_installations,
             vec![root.to_string_lossy().into_owned()]
         );
-        assert_eq!(settings.extra_clients.len(), 2);
+        assert_eq!(
+            settings.extra_clients,
+            vec![beta.to_string_lossy().into_owned()]
+        );
 
         // with a launcher file only the installed products count, via the installation
         fs::write(
@@ -1738,6 +1809,51 @@ mod tests {
         fs::create_dir_all(&junk).unwrap();
         assert!(register_folder(&mut Settings::default(), &junk).is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ignores_and_rejects_other_flavours() {
+        let root = temp_dir("other-flavours");
+        let retail = fake_flavour(&root, "_retail_", "wow", "Wow.exe");
+        let era = fake_flavour(&root, "_classic_era_", "wow_classic_era", "WowClassic.exe");
+        fs::write(
+            root.join(".build.info"),
+            "Version!STRING:0|Product!STRING:0\n12.1.0.69814|wow\n1.15.7.61582|wow_classic_era\n",
+        )
+        .unwrap();
+
+        // an installation with only other flavours cannot be added
+        let error = register_folder(&mut Settings::default(), &root).unwrap_err();
+        assert!(error.contains("no Forever client"), "{error}");
+
+        // installed or previously added clients of other flavours are ignored
+        let settings = Settings {
+            extra_clients: vec![
+                retail.to_string_lossy().into_owned(),
+                era.to_string_lossy().into_owned(),
+            ],
+            ..Settings::default()
+        };
+        let (dirs, _, clients) = clients_among(&settings, vec![root.clone()], None);
+        assert_eq!(dirs, vec![root.clone()]);
+        assert!(clients.is_empty(), "{:?}", clients.iter().map(|c| &c.id).collect::<Vec<_>>());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn creates_the_user_id_once() {
+        let mut settings = Settings::default();
+        assert!(ensure_user_id(&mut settings));
+        let id = settings.user_id.clone().unwrap();
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "{id}");
+        assert!(!ensure_user_id(&mut settings));
+        assert_eq!(settings.user_id.as_deref(), Some(id.as_str()));
+
+        let stored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(stored.user_id.as_deref(), Some(id.as_str()));
+        let legacy: Settings = serde_json::from_str(r#"{"auto_upload":true}"#).unwrap();
+        assert!(legacy.user_id.is_none());
     }
 
     #[test]

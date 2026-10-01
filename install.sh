@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Baut den Client aus diesem Checkout als Arch-Paket und installiert es (pacman).
-# FOREVERDB_GITHUB_TOKEN in der Umgebung bzw. src-tauri/github-token wird einkompiliert (Addon-Updates, siehe README).
+# Builds the client from this checkout as an Arch package and installs it (pacman).
+# FOREVERDB_GITHUB_TOKEN from the environment or src-tauri/github-token is compiled in (addon updates, see README).
 set -euo pipefail
 
 cd "$(dirname "$0")/packaging/arch"
 
-command -v makepkg >/dev/null || { echo "makepkg fehlt – dieses Script ist für Arch/CachyOS." >&2; exit 1; }
-[[ -n "${FOREVERDB_GITHUB_TOKEN:-}" || -s ../../src-tauri/github-token ]] || echo "Hinweis: weder FOREVERDB_GITHUB_TOKEN noch src-tauri/github-token gesetzt, Addon-Update-Prüfung bleibt aus." >&2
+command -v makepkg >/dev/null || { echo "makepkg is missing; this script is for Arch/CachyOS." >&2; exit 1; }
+[[ -n "${FOREVERDB_GITHUB_TOKEN:-}" || -s ../../src-tauri/github-token ]] || echo "Note: neither FOREVERDB_GITHUB_TOKEN nor src-tauri/github-token is set, so the addon update check stays off." >&2
 
-# -s: fehlende Abhängigkeiten nachinstallieren, -f: vorhandenes Paket überschreiben,
-# -i: installieren (fragt nach sudo), -c: Build-Ordner danach entfernen.
+# -s: install missing dependencies, -f: overwrite an existing package,
+# -i: install (asks for sudo), -c: remove the build folder afterwards.
 makepkg -sfic
 
 rm -f ./*.pkg.tar.*
-echo "Installiert: $(pacman -Q foreverdb-client)"
+echo "Installed: $(pacman -Q foreverdb-client)"

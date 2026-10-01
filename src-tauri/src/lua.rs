@@ -1,41 +1,41 @@
-//! Wandelt die ForeverCollect-SavedVariables (`ForeverCollectDB = { ... }`) in JSON,
-//! ohne Lua auszuführen: der Dump wird als Daten gelesen, nicht interpretiert.
+//! Converts the ForeverCollect SavedVariables (`ForeverCollectDB = { ... }`) to JSON
+//! without running Lua: the dump is read as data, never interpreted.
 //!
-//! Portierung des Go-Parsers, den bis dahin der Ingress betrieben hat
-//! (`foreverdb-server`, `services/ingress/cmd/ingress/lua.go`). Beide Seiten hängen am
-//! selben Golden Fixture: `tests/fixtures/snapshot.lua` und `snapshot.json`; die
-//! Server-Kopie des JSON liegt unter `services/ingress/cmd/ingress/testdata/`.
+//! Port of the Go parser the ingress used to run (`foreverdb-server`,
+//! `services/ingress/cmd/ingress/lua.go`). Both sides share the same golden fixture:
+//! `tests/fixtures/snapshot.lua` and `snapshot.json`; the server's copy of the JSON
+//! lives in `services/ingress/cmd/ingress/testdata/`.
 //!
-//! Zwei Eigenschaften müssen erhalten bleiben, sonst lehnt der Worker den Snapshot ab:
-//! ganzzahlige Lua-Zahlen werden JSON-Integer (nie `1617.0`), und dicht von 1 an
-//! indizierte Tabellen werden Arrays, alle anderen Objekte.
+//! Two properties must hold, or the worker rejects the snapshot: integral Lua numbers
+//! become JSON integers (never `1617.0`), and tables densely indexed from 1 become
+//! arrays, all others objects.
 
 use serde_json::{Map, Value};
 
-/// Der Client wird mit `panic = "abort"` gebaut, ein Stack Overflow im rekursiven
-/// Abstieg würde also die ganze App beenden. Echte Snapshots schachteln ~6 Ebenen.
+/// The client is built with `panic = "abort"`, so a stack overflow in the recursive
+/// descent would kill the whole app. Real snapshots nest about 6 levels deep.
 const MAX_DEPTH: usize = 200;
 
-/// Über dieser Grenze ist ein `f64` nicht mehr verlustfrei ganzzahlig.
+/// Above this limit an `f64` no longer represents integers exactly.
 const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 
 pub fn parse_forever_collect(source: &[u8]) -> Result<Value, String> {
     let mut parser = Parser::new(source)?;
     match &parser.current {
         Token::Ident(name) if name == "ForeverCollectDB" => {}
-        _ => return Err(parser.error("ForeverCollectDB-Zuweisung erwartet")),
+        _ => return Err(parser.error("expected the ForeverCollectDB assignment")),
     }
     parser.advance()?;
     parser.expect(&Token::Equals)?;
     parser.advance()?;
     let value = parser.parse_value()?;
     if parser.current != Token::Eof {
-        return Err(parser.error("unerwarteter Inhalt nach der Zuweisung"));
+        return Err(parser.error("unexpected content after the assignment"));
     }
 
     let root = match normalize(value)? {
         Value::Object(map) => map,
-        _ => return Err("ForeverCollectDB muss eine Tabelle sein.".to_string()),
+        _ => return Err("ForeverCollectDB must be a table.".to_string()),
     };
     validate(&root)?;
     Ok(Value::Object(root))
@@ -46,40 +46,40 @@ fn validate(root: &Map<String, Value>) -> Result<(), String> {
         Some(9.0) => {}
         _ => {
             return Err(
-                "Nicht unterstützte schemaVersion; es wird nur Version 9 akzeptiert. \
-                 Bitte das ForeverCollect-Addon aktualisieren."
+                "Unsupported schemaVersion; only version 9 is accepted. \
+                 Please update the ForeverCollect addon."
                     .to_string(),
             )
         }
     }
     let catalogs = match root.get("catalogs") {
         Some(Value::Object(catalogs)) => catalogs.len(),
-        // Eine leere Lua-Tabelle hat keine Schlüssel und kommt als leere Liste an.
+        // An empty Lua table has no keys and arrives as an empty list.
         Some(Value::Array(entries)) if entries.is_empty() => 0,
-        _ => return Err("catalogs muss eine nach Katalogschlüssel indizierte Tabelle sein.".to_string()),
+        _ => return Err("catalogs must be a table indexed by catalog key.".to_string()),
     };
     if catalogs == 0 {
         return Err(
-            "Der Snapshot enthält keine Kataloge; spiele eine Sitzung mit dem Addon, \
-             bevor du hochlädst."
+            "The snapshot contains no catalogs; play a session with the addon \
+             before uploading."
                 .to_string(),
         );
     }
     if let Some(key) = root.get("latestCatalogKey") {
         if !key.is_string() {
-            return Err("latestCatalogKey muss eine Zeichenkette sein.".to_string());
+            return Err("latestCatalogKey must be a string.".to_string());
         }
     }
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Zwischendarstellung
+// Intermediate representation
 // ---------------------------------------------------------------------------
 
-/// Ein Tabellenschlüssel. Numerische Schlüssel tragen ihre kanonische Dezimalform,
-/// weil `f64` in Rust weder `Eq` noch `Hash` ist — und weil genau diese Form später
-/// zum JSON-Objektschlüssel wird.
+/// A table key. Numeric keys carry their canonical decimal form, because `f64` is
+/// neither `Eq` nor `Hash` in Rust — and because exactly this form later becomes the
+/// JSON object key.
 #[derive(Clone, PartialEq, Eq)]
 enum LuaKey {
     Text(String),
@@ -104,8 +104,8 @@ fn normalize(value: LuaValue) -> Result<Value, String> {
     }
 }
 
-/// Dicht von 1 an indizierte Tabellen werden JSON-Arrays, alles andere Objekte —
-/// genau wie `normalizeLuaValue` auf der Go-Seite.
+/// Tables densely indexed from 1 become JSON arrays, everything else objects — just
+/// like `normalizeLuaValue` on the Go side.
 fn normalize_table(entries: Vec<(LuaKey, LuaValue)>) -> Result<Value, String> {
     let mut indices = Vec::with_capacity(entries.len());
     let mut dense = !entries.is_empty();
@@ -129,7 +129,7 @@ fn normalize_table(entries: Vec<(LuaKey, LuaValue)>) -> Result<Value, String> {
         }
     }
 
-    // Die Schlüssel sind eindeutig und alle >= 1, `maximum == len` heißt also lückenlos.
+    // The keys are unique and all >= 1, so `maximum == len` means there are no gaps.
     if dense && maximum == entries.len() as i64 {
         let mut slots: Vec<Option<Value>> = (0..entries.len()).map(|_| None).collect();
         for ((_, value), index) in entries.into_iter().zip(indices) {
@@ -148,25 +148,24 @@ fn normalize_table(entries: Vec<(LuaKey, LuaValue)>) -> Result<Value, String> {
     Ok(Value::Object(object))
 }
 
-/// Ganzzahlige Werte werden JSON-Integer. Das ist keine Kosmetik: der Worker
-/// unmarshalt Felder wie `questID` oder `interfaceVersion` in Go-`int`, und
-/// `encoding/json` scheitert hart an `1617.0`.
+/// Integral values become JSON integers. This is not cosmetic: the worker unmarshals
+/// fields such as `questID` or `interfaceVersion` into Go `int`, and `encoding/json`
+/// fails hard on `1617.0`.
 fn number_to_json(number: f64) -> Result<Value, String> {
     if !number.is_finite() {
-        return Err("Zahl außerhalb des gültigen Bereichs.".to_string());
+        return Err("number out of range.".to_string());
     }
     if number.fract() == 0.0 && number.abs() <= MAX_EXACT_INTEGER {
         return Ok(Value::Number((number as i64).into()));
     }
     serde_json::Number::from_f64(number)
         .map(Value::Number)
-        .ok_or_else(|| "Zahl außerhalb des gültigen Bereichs.".to_string())
+        .ok_or_else(|| "number out of range.".to_string())
 }
 
-/// Kanonische Dezimalform einer Zahl, wie sie als Objektschlüssel erscheint.
-/// Rusts `Display` für `f64` verhält sich hier wie Gos `FormatFloat(n, 'f', -1, 64)`:
-/// kürzeste rundreisefähige Form, nie Exponentialschreibweise, kein `.0` bei
-/// ganzen Zahlen.
+/// Canonical decimal form of a number as it appears as an object key. Rust's
+/// `Display` for `f64` behaves like Go's `FormatFloat(n, 'f', -1, 64)` here: the
+/// shortest round-tripping form, never exponent notation, no `.0` on integers.
 fn format_number(number: f64) -> String {
     format!("{number}")
 }
@@ -195,11 +194,11 @@ enum Token {
 impl Token {
     fn label(&self) -> &'static str {
         match self {
-            Token::Eof => "Dateiende",
-            Token::Ident(_) => "Bezeichner",
-            Token::Str(_) => "Zeichenkette",
-            Token::Number(_) => "Zahl",
-            Token::Bool(_) => "Wahrheitswert",
+            Token::Eof => "end of file",
+            Token::Ident(_) => "identifier",
+            Token::Str(_) => "string",
+            Token::Number(_) => "number",
+            Token::Bool(_) => "boolean",
             Token::Nil => "nil",
             Token::LBrace => "{",
             Token::RBrace => "}",
@@ -242,11 +241,11 @@ impl<'a> Parser<'a> {
         if std::mem::discriminant(&self.current) == std::mem::discriminant(kind) {
             return Ok(());
         }
-        Err(self.error(&format!("{} erwartet", kind.label())))
+        Err(self.error(&format!("expected {}", kind.label())))
     }
 
     fn error(&self, message: &str) -> String {
-        format!("Lua-Fehler bei Byte {}: {message}", self.pos)
+        format!("Lua error at byte {}: {message}", self.pos)
     }
 
     fn parse_value(&mut self) -> Result<LuaValue, String> {
@@ -268,14 +267,14 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(LuaValue::Nil)
             }
-            _ => Err(self.error("Lua-Literal erwartet")),
+            _ => Err(self.error("expected a Lua literal")),
         }
     }
 
     fn parse_table(&mut self) -> Result<LuaValue, String> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(self.error("Snapshot ist zu tief verschachtelt"));
+            return Err(self.error("the snapshot is nested too deeply"));
         }
         self.advance()?;
         let mut entries: Vec<(LuaKey, LuaValue)> = Vec::new();
@@ -283,7 +282,7 @@ impl<'a> Parser<'a> {
 
         while self.current != Token::RBrace {
             if self.current == Token::Eof {
-                return Err(self.error("nicht abgeschlossene Tabelle"));
+                return Err(self.error("unterminated table"));
             }
 
             let (key, value) = match self.current.clone() {
@@ -314,7 +313,7 @@ impl<'a> Parser<'a> {
             if self.current == Token::Comma || self.current == Token::Semicolon {
                 self.advance()?;
             } else if self.current != Token::RBrace {
-                return Err(self.error("Tabellentrenner erwartet"));
+                return Err(self.error("expected a table separator"));
             }
         }
         self.advance()?;
@@ -323,8 +322,8 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Doppelte Schlüssel überschreiben sich wie in einer Lua-Tabelle: der letzte gewinnt,
-/// die Einfügeposition bleibt erhalten.
+/// Duplicate keys overwrite each other as in a Lua table: the last one wins, the
+/// insertion position is kept.
 fn set_entry(entries: &mut Vec<(LuaKey, LuaValue)>, key: LuaKey, value: LuaValue) {
     if let Some(slot) = entries.iter_mut().find(|(existing, _)| *existing == key) {
         slot.1 = value;
@@ -338,11 +337,11 @@ fn make_key(value: &LuaValue) -> Result<LuaKey, String> {
         LuaValue::Str(text) => Ok(LuaKey::Text(text.clone())),
         LuaValue::Number(number) => {
             if !number.is_finite() {
-                return Err("ungültiger Tabellenschlüssel: Zahl außerhalb des gültigen Bereichs".to_string());
+                return Err("invalid table key: number out of range".to_string());
             }
             Ok(LuaKey::Number(format_number(*number)))
         }
-        _ => Err("ungültiger Tabellenschlüssel: Schlüssel müssen Zeichenketten oder Zahlen sein".to_string()),
+        _ => Err("invalid table key: keys must be strings or numbers".to_string()),
     }
 }
 
@@ -394,13 +393,13 @@ impl Lexer<'_> {
                 match text.parse::<f64>() {
                     Ok(number) => Token::Number(number),
                     Err(_) => {
-                        return Err(format!("Lua-Fehler bei Byte {start}: ungültige Zahl {text:?}"))
+                        return Err(format!("Lua error at byte {start}: invalid number {text:?}"))
                     }
                 }
             }
             _ => {
                 return Err(format!(
-                    "Lua-Fehler bei Byte {start}: nicht unterstütztes Zeichen {:?}",
+                    "Lua error at byte {start}: unsupported character {:?}",
                     character as char
                 ))
             }
@@ -408,9 +407,9 @@ impl Lexer<'_> {
         Ok((token, start))
     }
 
-    /// Lua-Strings sind Byte-Folgen: `\ddd` kann beliebige Bytes erzeugen. Am Ende
-    /// ersetzt `from_utf8_lossy` ungültige Sequenzen durch U+FFFD — dasselbe tut Gos
-    /// `json.Marshal` mit ungültigem UTF-8.
+    /// Lua strings are byte sequences: `\ddd` can produce arbitrary bytes. At the end
+    /// `from_utf8_lossy` replaces invalid sequences with U+FFFD — the same thing Go's
+    /// `json.Marshal` does with invalid UTF-8.
     fn read_string(&mut self, quote: u8, start: usize) -> Result<String, String> {
         let mut value: Vec<u8> = Vec::new();
         while self.pos < self.source.len() {
@@ -460,20 +459,20 @@ impl Lexer<'_> {
                         }
                         _ => {
                             return Err(format!(
-                                "Lua-Fehler bei Byte {start}: ungültige String-Escape-Sequenz"
+                                "Lua error at byte {start}: invalid string escape sequence"
                             ))
                         }
                     }
                 }
                 _ => {
                     return Err(format!(
-                        "Lua-Fehler bei Byte {start}: nicht unterstützte String-Escape-Sequenz"
+                        "Lua error at byte {start}: unsupported string escape sequence"
                     ))
                 }
             }
         }
         Err(format!(
-            "Lua-Fehler bei Byte {start}: nicht abgeschlossene Zeichenkette"
+            "Lua error at byte {start}: unterminated string"
         ))
     }
 
@@ -525,7 +524,7 @@ mod tests {
         parse_forever_collect(source.as_bytes())
     }
 
-    /// Nur die Zwischendarstellung, ohne die Snapshot-Validierung drumherum.
+    /// Only the intermediate representation, without the snapshot validation around it.
     fn parse_raw(source: &str) -> Result<Value, String> {
         let mut parser = Parser::new(source.as_bytes())?;
         parser.advance()?;
@@ -552,7 +551,7 @@ mod tests {
     fn rejects_a_snapshot_without_catalogs() {
         let error = parse("ForeverCollectDB = {\n[\"schemaVersion\"] = 9,\n[\"catalogs\"] = {\n},\n}")
             .unwrap_err();
-        assert!(error.contains("keine Kataloge"), "{error}");
+        assert!(error.contains("no catalogs"), "{error}");
     }
 
     #[test]
@@ -569,21 +568,21 @@ mod tests {
         assert!(error.contains("latestCatalogKey"), "{error}");
     }
 
-    /// Der Dump wird als Daten gelesen, nie ausgeführt: ein Funktionsaufruf ist
-    /// schlicht kein Literal und damit ein Parse-Fehler.
+    /// The dump is read as data, never executed: a function call simply is not a
+    /// literal and therefore a parse error.
     #[test]
     fn rejects_executable_lua() {
         let error = parse("ForeverCollectDB = { [\"x\"] = os.execute(\"rm -rf /\") }").unwrap_err();
-        assert!(error.contains("Literal"), "{error}");
+        assert!(error.contains("literal"), "{error}");
     }
 
     #[test]
     fn rejects_content_after_the_assignment() {
         let error = parse("ForeverCollectDB = { }\nprint(1)").unwrap_err();
-        assert!(error.contains("unerwarteter Inhalt"), "{error}");
+        assert!(error.contains("unexpected content"), "{error}");
     }
 
-    /// Der Worker unmarshalt diese Felder in Go-`int`; `143.0` würde ihn hart scheitern lassen.
+    /// The worker unmarshals these fields into Go `int`; `143.0` would make it fail hard.
     #[test]
     fn integral_numbers_stay_integers() {
         let value = parse_raw("x = { [\"spellID\"] = 143, [\"scannedAt\"] = 1789482844 }").unwrap();
@@ -601,7 +600,7 @@ mod tests {
     #[test]
     fn rejects_numbers_outside_the_valid_range() {
         let error = parse_raw("x = { 1e999 }").unwrap_err();
-        assert!(error.contains("außerhalb"), "{error}");
+        assert!(error.contains("out of range"), "{error}");
     }
 
     #[test]
@@ -659,7 +658,7 @@ mod tests {
     #[test]
     fn rejects_out_of_range_decimal_escapes() {
         let error = parse_raw(r#"x = { "\999" }"#).unwrap_err();
-        assert!(error.contains("Escape"), "{error}");
+        assert!(error.contains("escape"), "{error}");
     }
 
     #[test]
@@ -681,22 +680,22 @@ mod tests {
     #[test]
     fn reports_an_unterminated_table() {
         let error = parse_raw("x = { [\"a\"] = 1,").unwrap_err();
-        assert!(error.contains("nicht abgeschlossene Tabelle"), "{error}");
+        assert!(error.contains("unterminated table"), "{error}");
     }
 
     #[test]
     fn reports_an_unterminated_string() {
         let error = parse_raw("x = { \"abc }").unwrap_err();
-        assert!(error.contains("nicht abgeschlossene Zeichenkette"), "{error}");
+        assert!(error.contains("unterminated string"), "{error}");
     }
 
-    /// Der Client wird mit `panic = "abort"` gebaut: ohne Tiefenlimit würde eine
-    /// pathologische Datei die App über einen Stack Overflow beenden.
+    /// The client is built with `panic = "abort"`: without a depth limit a pathological
+    /// file would kill the app through a stack overflow.
     #[test]
     fn rejects_deeply_nested_tables() {
         let source = format!("x = {}{}", "{".repeat(300), "}".repeat(300));
         let error = parse_raw(&source).unwrap_err();
-        assert!(error.contains("zu tief verschachtelt"), "{error}");
+        assert!(error.contains("nested too deeply"), "{error}");
     }
 
     #[test]
@@ -705,14 +704,14 @@ mod tests {
         assert!(parse_raw(&source).is_ok());
     }
 
-    /// Vergleich gegen den Snapshot, den der Go-Ingress aus derselben Lua erzeugt hat.
-    /// Beide Dateien sind das gemeinsame Golden Fixture; die Server-Kopie des JSON
-    /// liegt unter `services/ingress/cmd/ingress/testdata/snapshot.json`.
-    /// `FOREVERDB_FIXTURE_LUA` / `FOREVERDB_FIXTURE_JSON` überschreiben die Pfade.
+    /// Compares against the snapshot the Go ingress produced from the same Lua. Both
+    /// files are the shared golden fixture; the server's copy of the JSON lives in
+    /// `services/ingress/cmd/ingress/testdata/snapshot.json`.
+    /// `FOREVERDB_FIXTURE_LUA` / `FOREVERDB_FIXTURE_JSON` override the paths.
     ///
-    /// Verglichen wird über `Value`, nicht über Bytes: Go escapt `<`, `>` und `&` als
-    /// `<`/`>`/`&`, serde_json nicht. Genau diesen Unterschied macht die
-    /// Kanonisierung im Ingress bedeutungslos.
+    /// The comparison is on `Value`, not on bytes: Go escapes `<`, `>` and `&` as
+    /// `<`/`>`/`&`, serde_json does not. The canonicalization in the ingress makes
+    /// exactly this difference irrelevant.
     #[test]
     fn matches_the_go_parser_on_the_golden_fixture() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
