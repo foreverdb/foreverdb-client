@@ -5,10 +5,10 @@
     "linux": {
       "deb": {
         "section": "utils",
-        "files": { "/usr/share/doc/forever-db-client/copyright": "../LICENSE" }
+        "files": { "/usr/share/doc/forever-db-uploader/copyright": "../LICENSE" }
       },
       "rpm": {
-        "files": { "/usr/share/licenses/forever-db-client/LICENSE": "../LICENSE" }
+        "files": { "/usr/share/licenses/forever-db-uploader/LICENSE": "../LICENSE" }
       },
       "appimage": { "bundleMediaFramework": false }
     }

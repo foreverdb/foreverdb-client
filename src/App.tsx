@@ -42,7 +42,7 @@ type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
 type UploadResult = { import_id: string | null; file_path: string; running: boolean; deleted: boolean };
-type Settings = { auto_upload: boolean; extra_clients: string[]; extra_installations: string[]; has_github_token: boolean; repository: string };
+type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; has_github_token: boolean; repository: string };
 type ImportStatus = { import_id: string; status: "queued" | "processing" | "completed" | "failed"; error: string | null };
 type Activity = {
   client: string;
@@ -210,10 +210,9 @@ function App() {
     }
   }
 
-  async function toggleAutoUpload() {
-    if (!settings) return;
+  async function toggleSetting(command: string, enabled: boolean) {
     try {
-      setSettings(await invoke<Settings>("set_auto_upload", { enabled: !settings.auto_upload }));
+      setSettings(await invoke<Settings>(command, { enabled }));
     } catch (message) {
       setError(String(message));
     }
@@ -267,12 +266,22 @@ function App() {
       <section className="intro">
         <p>
           ForeverCollect records what you see in World of Warcraft: Forever. Every time the game writes its data (logout, /reload, exit),
-          this client uploads it to ForeverDB and keeps a copy in its archive.
+          the uploader sends it to ForeverDB and keeps a copy in its archive.
         </p>
         <label className="switch">
-          <input type="checkbox" checked={settings?.auto_upload ?? true} onChange={toggleAutoUpload} disabled={settings === null} />
+          <input type="checkbox" checked={settings?.auto_upload ?? true} onChange={() => settings && void toggleSetting("set_auto_upload", !settings.auto_upload)} disabled={settings === null} />
           <span className="track" />
           <span>Upload automatically whenever WoW writes the file</span>
+        </label>
+        <label className="switch">
+          <input type="checkbox" checked={settings?.autostart ?? false} onChange={() => settings && void toggleSetting("set_autostart", !settings.autostart)} disabled={settings === null} />
+          <span className="track" />
+          <span>Start with the system, minimized to the tray</span>
+        </label>
+        <label className="switch">
+          <input type="checkbox" checked={settings?.close_to_tray ?? true} onChange={() => settings && void toggleSetting("set_close_to_tray", !settings.close_to_tray)} disabled={settings === null} />
+          <span className="track" />
+          <span>Closing the window keeps the uploader running in the tray</span>
         </label>
       </section>
 
@@ -471,7 +480,7 @@ function App() {
           </div>
         </div>
       )}
-      <footer>ForeverDB Client <span>·</span> {settings?.auto_upload ? "Watching for new data" : "Not watching"}</footer>
+      <footer>ForeverDB Uploader <span>·</span> {settings?.auto_upload ? "Watching for new data" : "Not watching"}</footer>
     </main>
   );
 }

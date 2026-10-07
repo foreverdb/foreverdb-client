@@ -61,6 +61,7 @@ footer { text-align: center; margin-top: 38px; } footer span { padding: 0 6px; c
 .switch input:checked + .track { background: #b5d46a; }
 .switch input:checked + .track::after { transform: translateX(16px); }
 .switch input:disabled + .track { opacity: .45; }
+.switch + .switch { margin-top: 10px; }
 .activity ul { list-style: none; margin: 0; padding: 0; }
 .activity li { display: flex; gap: 14px; padding: 9px 0; border-top: 1px solid #262c31; font-size: 13px; color: #dce5ed; }
 .activity li:first-child { border-top: 0; }

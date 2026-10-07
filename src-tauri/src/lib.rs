@@ -8,7 +8,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 mod addon;
 mod lua;
@@ -122,10 +125,13 @@ struct UploadResult {
 }
 
 /// Persisted in the app's config directory.
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Settings {
     #[serde(default = "default_true")]
     auto_upload: bool,
+    /// Closing the window hides it; the watcher keeps running behind the tray icon.
+    #[serde(default = "default_true")]
+    close_to_tray: bool,
     /// Flavour directories the user added on top of the installed clients.
     #[serde(default)]
     extra_clients: Vec<String>,
@@ -150,6 +156,13 @@ struct Settings {
     user_id: Option<String>,
 }
 
+/// A fresh install gets the same values as a settings.json that lacks the fields.
+impl Default for Settings {
+    fn default() -> Self {
+        serde_json::from_str("{}").expect("every field has a default")
+    }
+}
+
 /// Creates the user ID if the settings have none yet; returns whether it did.
 fn ensure_user_id(settings: &mut Settings) -> bool {
     if settings.user_id.is_some() {
@@ -163,6 +176,9 @@ fn ensure_user_id(settings: &mut Settings) -> bool {
 #[derive(Serialize)]
 struct SettingsView {
     auto_upload: bool,
+    close_to_tray: bool,
+    /// Read from the system's autostart entry, not stored in settings.json.
+    autostart: bool,
     extra_clients: Vec<String>,
     extra_installations: Vec<String>,
     has_github_token: bool,
@@ -170,9 +186,11 @@ struct SettingsView {
 }
 
 impl Settings {
-    fn view(&self) -> SettingsView {
+    fn view(&self, app: &AppHandle) -> SettingsView {
         SettingsView {
             auto_upload: self.auto_upload,
+            close_to_tray: self.close_to_tray,
+            autostart: app.autolaunch().is_enabled().unwrap_or(false),
             extra_clients: self.extra_clients.clone(),
             extra_installations: self.extra_installations.clone(),
             has_github_token: addon::github_token(self.github_token.as_deref()).is_some(),
@@ -970,13 +988,13 @@ struct AddedFolder {
 }
 
 #[tauri::command]
-fn add_client(state: tauri::State<'_, AppState>, dir: String) -> Result<AddedFolder, String> {
+fn add_client(app: AppHandle, state: tauri::State<'_, AppState>, dir: String) -> Result<AddedFolder, String> {
     let path = PathBuf::from(dir.trim_end_matches(['/', '\\']));
     let mut outcome = Err(String::new());
     let settings = state.update(|settings| outcome = register_folder(settings, &path));
     outcome.map(|id| AddedFolder {
         id,
-        settings: settings.view(),
+        settings: settings.view(&app),
     })
 }
 
@@ -984,7 +1002,7 @@ fn add_client(state: tauri::State<'_, AppState>, dir: String) -> Result<AddedFol
 /// installation is dropped as well, and an installed client of an added installation
 /// removes that installation.
 #[tauri::command]
-fn remove_client(state: tauri::State<'_, AppState>, id: String) -> SettingsView {
+fn remove_client(app: AppHandle, state: tauri::State<'_, AppState>, id: String) -> SettingsView {
     let parent = Path::new(&id)
         .parent()
         .map(|dir| dir.to_string_lossy().into_owned());
@@ -1005,7 +1023,7 @@ fn remove_client(state: tauri::State<'_, AppState>, id: String) -> SettingsView 
                 }
             }
         })
-        .view()
+        .view(&app)
 }
 
 fn client_by_id(settings: &Settings, id: &str) -> Result<ClientDef, String> {
@@ -1022,7 +1040,7 @@ const USER_HEADER: &str = "X-ForeverDB-User";
 
 /// Identifies the upload to the ingress; it ends up in `import_jobs.source`, so a
 /// parser regression can be traced to a client release.
-const CLIENT_TAG: &str = concat!("foreverdb-client/", env!("CARGO_PKG_VERSION"));
+const CLIENT_TAG: &str = concat!("foreverdb-uploader/", env!("CARGO_PKG_VERSION"));
 
 fn gzip(payload: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -1198,15 +1216,32 @@ async fn upload(
 }
 
 #[tauri::command]
-fn get_settings(state: tauri::State<'_, AppState>) -> SettingsView {
-    state.snapshot().view()
+fn get_settings(app: AppHandle, state: tauri::State<'_, AppState>) -> SettingsView {
+    state.snapshot().view(&app)
 }
 
 #[tauri::command]
-fn set_auto_upload(state: tauri::State<'_, AppState>, enabled: bool) -> SettingsView {
+fn set_auto_upload(app: AppHandle, state: tauri::State<'_, AppState>, enabled: bool) -> SettingsView {
     state
         .update(|settings| settings.auto_upload = enabled)
-        .view()
+        .view(&app)
+}
+
+#[tauri::command]
+fn set_close_to_tray(app: AppHandle, state: tauri::State<'_, AppState>, enabled: bool) -> SettingsView {
+    state
+        .update(|settings| settings.close_to_tray = enabled)
+        .view(&app)
+}
+
+/// Adds or removes the system's autostart entry (Linux: ~/.config/autostart, Windows:
+/// the Run key); it starts the app with --minimized.
+#[tauri::command]
+fn set_autostart(app: AppHandle, state: tauri::State<'_, AppState>, enabled: bool) -> Result<SettingsView, String> {
+    let autolaunch = app.autolaunch();
+    let changed = if enabled { autolaunch.enable() } else { autolaunch.disable() };
+    changed.map_err(|error| format!("Could not change the autostart entry: {error}"))?;
+    Ok(state.snapshot().view(&app))
 }
 
 /// How long a release check stays valid before the watcher asks GitHub again.
@@ -1273,14 +1308,14 @@ async fn install_addon(
 }
 
 #[tauri::command]
-fn set_github_token(state: tauri::State<'_, AppState>, token: Option<String>) -> SettingsView {
+fn set_github_token(app: AppHandle, state: tauri::State<'_, AppState>, token: Option<String>) -> SettingsView {
     let token = token
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     *state.release.lock().unwrap() = None;
     state
         .update(|settings| settings.github_token = token)
-        .view()
+        .view(&app)
 }
 
 /// Checks for a new addon release on start and every RELEASE_CHECK_INTERVAL and
@@ -1574,22 +1609,119 @@ async fn tokio_sleep(duration: Duration) {
         .ok();
 }
 
+/// Identifier of the releases before 0.2; their settings and archive are taken over once.
+const LEGACY_IDENTIFIER: &str = "com.alex.foreverdb-client";
+/// Passed by the autostart entry: start in the tray without showing the window.
+const MINIMIZED_ARG: &str = "--minimized";
+
+/// Copies `file` from the legacy directory next to `dir` unless `dir` already has one.
+fn migrate_legacy_file(dir: &Path, file: &str) {
+    let target = dir.join(file);
+    let Some(legacy) = dir.parent().map(|parent| parent.join(LEGACY_IDENTIFIER).join(file)) else {
+        return;
+    };
+    if target.exists() || !legacy.is_file() {
+        return;
+    }
+    let _ = fs::create_dir_all(dir);
+    let _ = fs::copy(&legacy, &target);
+}
+
+/// Moves the legacy archive next to `dir` into `dir` unless `dir` already has one.
+fn migrate_legacy_archive(dir: &Path, name: &str) {
+    let target = dir.join(name);
+    let Some(legacy) = dir.parent().map(|parent| parent.join(LEGACY_IDENTIFIER).join(name)) else {
+        return;
+    };
+    if target.exists() || !legacy.is_dir() {
+        return;
+    }
+    let _ = fs::create_dir_all(dir);
+    if fs::rename(&legacy, &target).is_err() {
+        // Different file systems: copy instead, the legacy copy stays.
+        let _ = copy_dir(&legacy, &target);
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Tray icon with "Show" and "Quit"; a left click shows the window as well.
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show ForeverDB Uploader", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("ForeverDB Uploader")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // First, so a second start only shows the running instance and never spawns a second watcher.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main_window(app)))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![MINIMIZED_ARG]),
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let settings_path = app
-                .path()
-                .app_config_dir()
+            let config_dir = app.path().app_config_dir().ok();
+            let data_dir = app.path().app_data_dir().ok();
+            if let Some(dir) = &config_dir {
+                migrate_legacy_file(dir, "settings.json");
+            }
+            if let Some(dir) = &data_dir {
+                migrate_legacy_archive(dir, "archive");
+            }
+            let settings_path = config_dir
                 .map(|dir| dir.join("settings.json"))
-                .unwrap_or_else(|_| PathBuf::from("foreverdb-client-settings.json"));
-            let archive_dir = app
-                .path()
-                .app_data_dir()
+                .unwrap_or_else(|| PathBuf::from("foreverdb-uploader-settings.json"));
+            let archive_dir = data_dir
                 .map(|dir| dir.join("archive"))
-                .unwrap_or_else(|_| PathBuf::from("foreverdb-client-archive"));
+                .unwrap_or_else(|| PathBuf::from("foreverdb-uploader-archive"));
             let state = AppState::load(settings_path, archive_dir);
             if state.snapshot().user_id.is_none() {
                 state.update(|settings| {
@@ -1597,9 +1729,23 @@ pub fn run() {
                 });
             }
             app.manage(state);
+            build_tray(app)?;
+            // The window starts hidden (tauri.conf.json) so an autostart never flashes it.
+            if !std::env::args().any(|arg| arg == MINIMIZED_ARG) {
+                show_main_window(app.handle());
+            }
             tauri::async_runtime::spawn(watch_and_upload(app.handle().clone()));
             tauri::async_runtime::spawn(watch_releases(app.handle().clone()));
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+                if window.label() == "main" && state.snapshot().close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             detect_installation,
@@ -1609,6 +1755,8 @@ pub fn run() {
             upload,
             get_settings,
             set_auto_upload,
+            set_close_to_tray,
+            set_autostart,
             check_addon_update,
             install_addon,
             set_github_token
@@ -1624,7 +1772,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("foreverdb-client-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("foreverdb-uploader-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         normalize_dir(&dir)
@@ -1854,6 +2002,36 @@ mod tests {
         assert_eq!(stored.user_id.as_deref(), Some(id.as_str()));
         let legacy: Settings = serde_json::from_str(r#"{"auto_upload":true}"#).unwrap();
         assert!(legacy.user_id.is_none());
+    }
+
+    #[test]
+    fn fresh_and_legacy_settings_close_to_tray_and_upload() {
+        let fresh = Settings::default();
+        assert!(fresh.auto_upload && fresh.close_to_tray);
+        let legacy: Settings = serde_json::from_str(r#"{"auto_upload":false}"#).unwrap();
+        assert!(!legacy.auto_upload && legacy.close_to_tray);
+    }
+
+    #[test]
+    fn migrates_legacy_settings_and_archive_once() {
+        let root = temp_dir("migrate");
+        let legacy = root.join(LEGACY_IDENTIFIER);
+        fs::create_dir_all(legacy.join("archive/sub")).unwrap();
+        fs::write(legacy.join("settings.json"), "old").unwrap();
+        fs::write(legacy.join("archive/sub/a.lua"), "a").unwrap();
+        let current = root.join("gg.foreverdb.client");
+
+        migrate_legacy_file(&current, "settings.json");
+        migrate_legacy_archive(&current, "archive");
+        assert_eq!(fs::read_to_string(current.join("settings.json")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(current.join("archive/sub/a.lua")).unwrap(), "a");
+
+        // Existing settings are never overwritten.
+        fs::write(current.join("settings.json"), "new").unwrap();
+        fs::write(legacy.join("settings.json"), "older").unwrap();
+        migrate_legacy_file(&current, "settings.json");
+        assert_eq!(fs::read_to_string(current.join("settings.json")).unwrap(), "new");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    foreverdb_client_lib::run()
+    foreverdb_uploader_lib::run()
 }

@@ -1,5 +1,5 @@
 [package]
-name = "foreverdb-client"
+name = "foreverdb-uploader"
 version = "0.2.0"
 description = "Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB"
 authors = ["Alex Bangert"]
@@ -14,14 +14,14 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "foreverdb_client_lib"
+name = "foreverdb_uploader_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,6 +30,9 @@ tauri-plugin-dialog = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 uuid = { version = "1", features = ["v4"] }
+# Start with the system; one instance only (a second start shows the running one).
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 
 # Windows only: canonical paths, the launcher's registry entries, process list.
 [target.'cfg(target_os = "windows")'.dependencies]

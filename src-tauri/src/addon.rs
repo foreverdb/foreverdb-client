@@ -9,7 +9,7 @@ use std::time::Duration;
 
 pub const ADDON_FOLDER: &str = "ForeverCollect";
 const DEFAULT_REPO: &str = "foreverdb/forevercollect-addon";
-const USER_AGENT: &str = "foreverdb-client";
+const USER_AGENT: &str = "foreverdb-uploader";
 
 /// Token precedence: runtime environment, value compiled in at build time
 /// (`FOREVERDB_GITHUB_TOKEN=... pnpm tauri build` or `src-tauri/github-token`),

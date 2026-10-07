@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=ForeverDB Client
+Name=ForeverDB Uploader
 Comment=Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB
-Exec=foreverdb-client
-Icon=foreverdb-client
+Exec=foreverdb-uploader
+Icon=foreverdb-uploader
 Terminal=false
 Categories=Utility;Game;
 Keywords=WoW;World of Warcraft;ForeverCollect;ForeverDB;
-StartupWMClass=foreverdb-client
+StartupWMClass=foreverdb-uploader
