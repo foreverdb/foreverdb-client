@@ -146,10 +146,6 @@ struct Settings {
     /// SavedVariables file, so this stands in for its timestamp when judging crash dumps.
     #[serde(default)]
     last_upload_at: HashMap<String, u64>,
-    /// GitHub token for the private addon repository (fallback after the environment
-    /// and the value compiled in at build time). Never handed to the window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    github_token: Option<String>,
     /// Random ID created on the first start and kept from then on. Sent with every
     /// upload (`X-ForeverDB-User`) so the server can block a user and delete their data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,7 +177,6 @@ struct SettingsView {
     autostart: bool,
     extra_clients: Vec<String>,
     extra_installations: Vec<String>,
-    has_github_token: bool,
     repository: String,
 }
 
@@ -193,7 +188,6 @@ impl Settings {
             autostart: app.autolaunch().is_enabled().unwrap_or(false),
             extra_clients: self.extra_clients.clone(),
             extra_installations: self.extra_installations.clone(),
-            has_github_token: addon::github_token(self.github_token.as_deref()).is_some(),
             repository: addon::repository(),
         }
     }
@@ -1256,9 +1250,7 @@ async fn latest_release(state: &AppState, force: bool) -> Result<AddonRelease, S
             }
         }
     }
-    let token = addon::github_token(state.snapshot().github_token.as_deref())
-        .ok_or_else(|| "No GitHub token configured for addon updates.".to_string())?;
-    let result = addon::fetch_latest_release(&token).await;
+    let result = addon::fetch_latest_release().await;
     *state.release.lock().unwrap() = Some(ReleaseCache {
         checked_at: std::time::Instant::now(),
         result: result.clone(),
@@ -1288,16 +1280,14 @@ async fn install_addon(
 ) -> Result<InstallResult, String> {
     let def = client_by_id(&state.snapshot(), &client)?;
     let release = latest_release(&state, false).await?;
-    let token = addon::github_token(state.snapshot().github_token.as_deref())
-        .ok_or_else(|| "No GitHub token configured for addon updates.".to_string())?;
-    let zip_bytes = addon::download_asset(&token, &release).await?;
+    let zip_bytes = addon::download_asset(&release).await?;
     let client_dir = PathBuf::from(&def.id);
     let version = release.version.clone();
     tauri::async_runtime::spawn_blocking(move || {
         addon::install_from_zip(&client_dir, &zip_bytes, &version)
     })
     .await
-    .map_err(|e| format!("Installation abgebrochen: {e}"))??;
+    .map_err(|e| format!("Installation aborted: {e}"))??;
     Ok(InstallResult {
         version: release.version,
         addon_dir: addon::addon_dir(Path::new(&def.id))
@@ -1305,17 +1295,6 @@ async fn install_addon(
             .into_owned(),
         running: wow_is_running(&def.process),
     })
-}
-
-#[tauri::command]
-fn set_github_token(app: AppHandle, state: tauri::State<'_, AppState>, token: Option<String>) -> SettingsView {
-    let token = token
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    *state.release.lock().unwrap() = None;
-    state
-        .update(|settings| settings.github_token = token)
-        .view(&app)
 }
 
 /// Checks for a new addon release on start and every RELEASE_CHECK_INTERVAL and
@@ -1758,8 +1737,7 @@ pub fn run() {
             set_close_to_tray,
             set_autostart,
             check_addon_update,
-            install_addon,
-            set_github_token
+            install_addon
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

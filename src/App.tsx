@@ -42,7 +42,7 @@ type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
 type UploadResult = { import_id: string | null; file_path: string; running: boolean; deleted: boolean };
-type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; has_github_token: boolean; repository: string };
+type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; repository: string };
 type ImportStatus = { import_id: string; status: "queued" | "processing" | "completed" | "failed"; error: string | null };
 type Activity = {
   client: string;
@@ -370,7 +370,6 @@ function App() {
                       </>
                     )}
                     {!release && releaseError && <span className="warning">{releaseError}</span>}
-                    {!release && !releaseError && settings && !settings.has_github_token && "No GitHub token configured – update check disabled."}
                   </small>
                   {installed && installed.running && <small className="warning">Installed – takes effect after your next login or /reload.</small>}
                 </div>

@@ -11,18 +11,6 @@ pub const ADDON_FOLDER: &str = "ForeverCollect";
 const DEFAULT_REPO: &str = "foreverdb/forevercollect-addon";
 const USER_AGENT: &str = "foreverdb-uploader";
 
-/// Token precedence: runtime environment, value compiled in at build time
-/// (`FOREVERDB_GITHUB_TOKEN=... pnpm tauri build` or `src-tauri/github-token`),
-/// stored settings.
-pub fn github_token(stored: Option<&str>) -> Option<String> {
-    std::env::var("FOREVERDB_GITHUB_TOKEN")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| option_env!("FOREVERDB_GITHUB_TOKEN").map(str::to_owned))
-        .or_else(|| stored.map(str::to_owned))
-        .filter(|value| !value.trim().is_empty())
-}
-
 pub fn repository() -> String {
     std::env::var("FOREVERDB_ADDON_REPO")
         .ok()
@@ -105,14 +93,9 @@ struct GithubAsset {
     url: String,
 }
 
-fn github_client(token: &str) -> Result<reqwest::Client, String> {
+/// The addon repository is public, so GitHub is asked without a token.
+fn github_client() -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
-    let auth = format!("Bearer {}", token.trim());
-    headers.insert(
-        reqwest::header::AUTHORIZATION,
-        auth.parse()
-            .map_err(|_| "The token contains invalid characters.".to_string())?,
-    );
     headers.insert("X-GitHub-Api-Version", "2022-11-28".parse().unwrap());
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -123,31 +106,30 @@ fn github_client(token: &str) -> Result<reqwest::Client, String> {
 
 fn explain_status(status: reqwest::StatusCode, what: &str) -> String {
     match status.as_u16() {
-        401 => "The GitHub token is invalid or expired.".to_string(),
-        403 => "The GitHub token has no access to the addon repository (needs the Contents: Read permission).".to_string(),
-        404 => format!("Could not find {what} (the repository or release is missing, or the token has no access)."),
+        403 | 429 => format!("GitHub refused the request for {what} (rate limit reached); try again later."),
+        404 => format!("Could not find {what} (the repository or release is missing)."),
         _ => format!("GitHub answered {status} for {what}."),
     }
 }
 
-pub async fn fetch_latest_release(token: &str) -> Result<AddonRelease, String> {
+pub async fn fetch_latest_release() -> Result<AddonRelease, String> {
     let url = format!(
         "https://api.github.com/repos/{}/releases/latest",
         repository()
     );
-    let response = github_client(token)?
+    let response = github_client()?
         .get(&url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .map_err(|e| format!("Release-Abfrage fehlgeschlagen: {e}"))?;
+        .map_err(|e| format!("Release check failed: {e}"))?;
     if !response.status().is_success() {
         return Err(explain_status(response.status(), "the latest release"));
     }
     let release: GithubRelease = response
         .json()
         .await
-        .map_err(|e| format!("Release-Antwort unlesbar: {e}"))?;
+        .map_err(|e| format!("Could not read the release response: {e}"))?;
     let asset = release
         .assets
         .iter()
@@ -173,20 +155,20 @@ pub async fn fetch_latest_release(token: &str) -> Result<AddonRelease, String> {
     })
 }
 
-pub async fn download_asset(token: &str, release: &AddonRelease) -> Result<Vec<u8>, String> {
-    let response = github_client(token)?
+pub async fn download_asset(release: &AddonRelease) -> Result<Vec<u8>, String> {
+    let response = github_client()?
         .get(&release.asset_url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(|e| format!("Download fehlgeschlagen: {e}"))?;
+        .map_err(|e| format!("Download failed: {e}"))?;
     if !response.status().is_success() {
         return Err(explain_status(response.status(), "the addon zip"));
     }
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("Download abgebrochen: {e}"))?;
+        .map_err(|e| format!("Download aborted: {e}"))?;
     if release.asset_size > 0 && bytes.len() as u64 != release.asset_size {
         return Err(format!(
             "Incomplete download ({} of {} bytes).",
@@ -206,13 +188,13 @@ pub fn extract_addon(
     expected_version: &str,
 ) -> Result<(), String> {
     let mut archive =
-        zip::ZipArchive::new(Cursor::new(zip_bytes)).map_err(|e| format!("Zip unlesbar: {e}"))?;
+        zip::ZipArchive::new(Cursor::new(zip_bytes)).map_err(|e| format!("Could not read the zip: {e}"))?;
     let prefix = format!("{ADDON_FOLDER}/");
     let mut saw_toc = false;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
-            .map_err(|e| format!("Zip-Eintrag unlesbar: {e}"))?;
+            .map_err(|e| format!("Could not read a zip entry: {e}"))?;
         let name = entry.name().to_string();
         let Some(relative) = name.strip_prefix(&prefix) else {
             return Err(format!(
@@ -227,12 +209,12 @@ pub fn extract_addon(
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
         {
-            return Err(format!("Unsicherer Pfad im Zip: {name}"));
+            return Err(format!("Unsafe path in the zip: {name}"));
         }
         let mut content = Vec::with_capacity(entry.size() as usize);
         entry
             .read_to_end(&mut content)
-            .map_err(|e| format!("Zip-Eintrag {name} unlesbar: {e}"))?;
+            .map_err(|e| format!("Could not read the zip entry {name}: {e}"))?;
         if relative == "ForeverCollect.toc" {
             let found = toc_version(&String::from_utf8_lossy(&content));
             if found.as_deref() != Some(expected_version) {

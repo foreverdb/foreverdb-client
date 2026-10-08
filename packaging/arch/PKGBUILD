@@ -1,7 +1,6 @@
 # Maintainer: Alex Bangert
 # Builds from the checkout this file lives in (no download):
 #   cd packaging/arch && makepkg -si
-# FOREVERDB_GITHUB_TOKEN from the environment or src-tauri/github-token is compiled in at build time (addon updates).
 # Keep pkgver in sync with package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json.
 pkgname=foreverdb-uploader
 pkgver=0.2.0

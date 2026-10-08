@@ -6,5 +6,6 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 
-# GitHub token for addon updates, compiled in at build time (see README)
+
+# Former GitHub token file for addon updates (no longer used); keep it out of git
 /github-token

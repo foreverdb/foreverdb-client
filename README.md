@@ -4,6 +4,8 @@ Desktop uploader for the ForeverCollect SavedVariables of **World of Warcraft: F
 
 Development: `pnpm tauri dev`. Build: `pnpm tauri build`.
 
+**Release:** Bump the version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` and `packaging/arch/PKGBUILD`, push, then start Actions → "Release" → "Run workflow". It runs the tests, builds the Linux packages (deb, rpm, AppImage) and the Windows installer, and attaches them to the release `v<version>` (a draft by default).
+
 ## Using the uploader
 
 The window follows the order in which things have to happen:
@@ -27,7 +29,7 @@ The window follows the order in which things have to happen:
 
 The "Activity" list below the cards shows what the background watcher did during this session.
 
-Environment overrides: `FOREVERDB_WOW_DIR`, `FOREVERDB_INGRESS_URL`, `FOREVERDB_ADDON_REPO`, `FOREVERDB_GITHUB_TOKEN`.
+Environment overrides: `FOREVERDB_WOW_DIR`, `FOREVERDB_INGRESS_URL`, `FOREVERDB_ADDON_REPO`.
 
 ## Automatic upload
 
@@ -80,12 +82,7 @@ The uploader converts the SavedVariables to JSON itself and uploads only that (`
 
 While the game is running, the new version takes effect on the next login or `/reload`.
 
-**GitHub token:** The repository is private, so the check needs a GitHub token (a fine-grained PAT for this repository only, with the "Contents: Read-only" permission). The uploader uses the first one it finds:
-1. the `FOREVERDB_GITHUB_TOKEN` environment variable at runtime
-2. the value compiled in at build time
-3. `github_token` in `settings.json`
-
-The compiled-in value comes from `FOREVERDB_GITHUB_TOKEN` in the build environment (`FOREVERDB_GITHUB_TOKEN=github_pat_… pnpm tauri build`). If that is not set, it comes from the contents of `src-tauri/github-token`: store the token there once and every build picks it up, including the Arch package. The file is excluded by `.gitignore`. Note that the token ends up in plain text inside the binary; it is never handed to the window.
+The addon repository is public, so the check and the download need no GitHub token. GitHub allows 60 unauthenticated API requests per hour and IP, far more than the check every 6 hours uses.
 
 ## User ID
 
@@ -116,7 +113,7 @@ Then run `pnpm install` and `pnpm tauri build`. On Arch-based systems use `NO_ST
   - Tauri downloads `linuxdeploy` while building, so network access is required.
   - To build only this target: `pnpm tauri build --bundles appimage`.
 
-**Arch/CachyOS package:** `cd packaging/arch && makepkg -sfic` builds from the checkout without downloading anything. It installs the binary, the `.desktop` file and the icons; `pacman -Rns foreverdb-uploader` removes them again. The package replaces the old `foreverdb-client` package. `FOREVERDB_GITHUB_TOKEN` or `src-tauri/github-token` is compiled in just like with `pnpm tauri build` (see "Addon updates").
+**Arch/CachyOS package:** `cd packaging/arch && makepkg -sfic` builds from the checkout without downloading anything. It installs the binary, the `.desktop` file and the icons; `pacman -Rns foreverdb-uploader` removes them again. The package replaces the old `foreverdb-client` package.
 
 For data paths see "Automatic upload". If the window stays white or empty (typically Wayland with NVIDIA), start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1 foreverdb-uploader`.
 
