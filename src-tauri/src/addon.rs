@@ -108,7 +108,9 @@ fn github_client() -> Result<reqwest::Client, String> {
 
 fn explain_status(status: reqwest::StatusCode, what: &str) -> String {
     match status.as_u16() {
-        403 | 429 => format!("GitHub refused the request for {what} (rate limit reached); try again later."),
+        403 | 429 => {
+            format!("GitHub refused the request for {what} (rate limit reached); try again later.")
+        }
         404 => format!("Could not find {what} (the repository or release is missing)."),
         _ => format!("GitHub answered {status} for {what}."),
     }
@@ -189,8 +191,8 @@ pub fn extract_addon(
     target: &Path,
     expected_version: &str,
 ) -> Result<(), String> {
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(zip_bytes)).map_err(|e| format!("Could not read the zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
+        .map_err(|e| format!("Could not read the zip: {e}"))?;
     let prefix = format!("{ADDON_FOLDER}/");
     let mut saw_toc = false;
     for index in 0..archive.len() {
@@ -199,9 +201,7 @@ pub fn extract_addon(
             .map_err(|e| format!("Could not read a zip entry: {e}"))?;
         let name = entry.name().to_string();
         let Some(relative) = name.strip_prefix(&prefix) else {
-            return Err(format!(
-                "Unexpected zip entry outside {prefix}: {name}"
-            ));
+            return Err(format!("Unexpected zip entry outside {prefix}: {name}"));
         };
         if relative.is_empty() || entry.is_dir() {
             continue;

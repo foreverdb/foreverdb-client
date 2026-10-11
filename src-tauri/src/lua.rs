@@ -45,11 +45,9 @@ fn validate(root: &Map<String, Value>) -> Result<(), String> {
     match root.get("schemaVersion").and_then(Value::as_f64) {
         Some(9.0) => {}
         _ => {
-            return Err(
-                "Unsupported schemaVersion; only version 9 is accepted. \
+            return Err("Unsupported schemaVersion; only version 9 is accepted. \
                  Please update the ForeverCollect addon."
-                    .to_string(),
-            )
+                .to_string())
         }
     }
     let catalogs = match root.get("catalogs") {
@@ -393,7 +391,9 @@ impl Lexer<'_> {
                 match text.parse::<f64>() {
                     Ok(number) => Token::Number(number),
                     Err(_) => {
-                        return Err(format!("Lua error at byte {start}: invalid number {text:?}"))
+                        return Err(format!(
+                            "Lua error at byte {start}: invalid number {text:?}"
+                        ))
                     }
                 }
             }
@@ -471,9 +471,7 @@ impl Lexer<'_> {
                 }
             }
         }
-        Err(format!(
-            "Lua error at byte {start}: unterminated string"
-        ))
+        Err(format!("Lua error at byte {start}: unterminated string"))
     }
 
     fn skip_space_and_comments(&mut self) {
@@ -542,22 +540,25 @@ mod tests {
 
     #[test]
     fn rejects_an_unsupported_schema_version() {
-        let source = "ForeverCollectDB = {\n[\"schemaVersion\"] = 8,\n[\"catalogs\"] = { [\"k\"] = {} },\n}";
+        let source =
+            "ForeverCollectDB = {\n[\"schemaVersion\"] = 8,\n[\"catalogs\"] = { [\"k\"] = {} },\n}";
         let error = parse(source).unwrap_err();
         assert!(error.contains("schemaVersion"), "{error}");
     }
 
     #[test]
     fn rejects_a_snapshot_without_catalogs() {
-        let error = parse("ForeverCollectDB = {\n[\"schemaVersion\"] = 9,\n[\"catalogs\"] = {\n},\n}")
-            .unwrap_err();
+        let error =
+            parse("ForeverCollectDB = {\n[\"schemaVersion\"] = 9,\n[\"catalogs\"] = {\n},\n}")
+                .unwrap_err();
         assert!(error.contains("no catalogs"), "{error}");
     }
 
     #[test]
     fn rejects_a_non_table_catalogs_field() {
-        let error = parse("ForeverCollectDB = {\n[\"schemaVersion\"] = 9,\n[\"catalogs\"] = \"nope\",\n}")
-            .unwrap_err();
+        let error =
+            parse("ForeverCollectDB = {\n[\"schemaVersion\"] = 9,\n[\"catalogs\"] = \"nope\",\n}")
+                .unwrap_err();
         assert!(error.contains("catalogs"), "{error}");
     }
 
@@ -612,7 +613,10 @@ mod tests {
 
     #[test]
     fn dense_tables_become_arrays() {
-        assert_eq!(parse_raw("x = { true, false }").unwrap(), serde_json::json!([true, false]));
+        assert_eq!(
+            parse_raw("x = { true, false }").unwrap(),
+            serde_json::json!([true, false])
+        );
         assert_eq!(
             parse_raw("x = { [1] = \"a\", [2] = \"b\", [3] = \"c\" }").unwrap(),
             serde_json::json!(["a", "b", "c"])
@@ -629,7 +633,10 @@ mod tests {
             parse_raw("x = { [0] = 1, [1] = 2 }").unwrap(),
             serde_json::json!({ "0": 1, "1": 2 })
         );
-        assert_eq!(parse_raw("x = { [1.5] = 1 }").unwrap(), serde_json::json!({ "1.5": 1 }));
+        assert_eq!(
+            parse_raw("x = { [1.5] = 1 }").unwrap(),
+            serde_json::json!({ "1.5": 1 })
+        );
     }
 
     #[test]
@@ -639,19 +646,27 @@ mod tests {
 
     #[test]
     fn nil_values_become_null() {
-        assert_eq!(parse_raw("x = { [\"a\"] = nil }").unwrap(), serde_json::json!({ "a": null }));
+        assert_eq!(
+            parse_raw("x = { [\"a\"] = nil }").unwrap(),
+            serde_json::json!({ "a": null })
+        );
     }
 
     #[test]
     fn later_duplicate_keys_win() {
-        assert_eq!(parse_raw("x = { [\"a\"] = 1, [\"a\"] = 2 }").unwrap(), serde_json::json!({ "a": 2 }));
+        assert_eq!(
+            parse_raw("x = { [\"a\"] = 1, [\"a\"] = 2 }").unwrap(),
+            serde_json::json!({ "a": 2 })
+        );
     }
 
     #[test]
     fn reads_string_escapes() {
-        let value = parse_raw(r#"x = { "\065\066", "a\tb", "c\z
-            d", "\\", "'" }"#)
-            .unwrap();
+        let value = parse_raw(
+            r#"x = { "\065\066", "a\tb", "c\z
+            d", "\\", "'" }"#,
+        )
+        .unwrap();
         assert_eq!(value, serde_json::json!(["AB", "a\tb", "cd", "\\", "'"]));
     }
 
@@ -669,12 +684,18 @@ mod tests {
 
     #[test]
     fn identifier_keys_are_supported() {
-        assert_eq!(parse_raw("x = { schemaVersion = 9 }").unwrap(), serde_json::json!({ "schemaVersion": 9 }));
+        assert_eq!(
+            parse_raw("x = { schemaVersion = 9 }").unwrap(),
+            serde_json::json!({ "schemaVersion": 9 })
+        );
     }
 
     #[test]
     fn semicolons_separate_entries() {
-        assert_eq!(parse_raw("x = { 1; 2; 3 }").unwrap(), serde_json::json!([1, 2, 3]));
+        assert_eq!(
+            parse_raw("x = { 1; 2; 3 }").unwrap(),
+            serde_json::json!([1, 2, 3])
+        );
     }
 
     #[test]

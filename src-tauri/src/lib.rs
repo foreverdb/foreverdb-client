@@ -22,7 +22,8 @@ use addon::AddonRelease;
 // "_classic_beta_": its ".flavor.info" names the product, the "Wow*.exe" in it
 // the process to watch, and the launcher's ".build.info" the installed version.
 
-const DEFAULT_TARGET_URL: &str = "https://foreverdb-ingress.kube.alexbangert.dev/imports/forevercollect";
+const DEFAULT_TARGET_URL: &str =
+    "https://foreverdb-ingress.kube.alexbangert.dev/imports/forevercollect";
 
 /// The only product the client works with: Forever runs in the "_classic_beta_" folder.
 /// Classic, Classic Era and Retail are not supported yet.
@@ -1055,7 +1056,11 @@ struct AddedFolder {
 }
 
 #[tauri::command]
-fn add_client(app: AppHandle, state: tauri::State<'_, AppState>, dir: String) -> Result<AddedFolder, String> {
+fn add_client(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    dir: String,
+) -> Result<AddedFolder, String> {
     let path = PathBuf::from(dir.trim_end_matches(['/', '\\']));
     let mut outcome = Err(String::new());
     let settings = state.update(|settings| outcome = register_folder(settings, &path));
@@ -1161,13 +1166,13 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     })?;
     let source = snapshot_source(client_dir).ok_or_else(|| {
         if main_path.is_file() {
-            "The file holds no collected data yet (empty database since the last upload).".to_string()
+            "The file holds no collected data yet (empty database since the last upload)."
+                .to_string()
         } else {
             format!("No ForeverCollect.lua found: {}", main_path.display())
         }
     })?;
-    let content =
-        fs::read(&source.path).map_err(|e| format!("Cannot read the file: {e}"))?;
+    let content = fs::read(&source.path).map_err(|e| format!("Cannot read the file: {e}"))?;
     let content_hash = content_hash(&content);
 
     // The server only accepts JSON. If the conversion fails, the snapshot itself is
@@ -1331,14 +1336,22 @@ fn get_settings(app: AppHandle, state: tauri::State<'_, AppState>) -> SettingsVi
 }
 
 #[tauri::command]
-fn set_auto_upload(app: AppHandle, state: tauri::State<'_, AppState>, enabled: bool) -> SettingsView {
+fn set_auto_upload(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> SettingsView {
     state
         .update(|settings| settings.auto_upload = enabled)
         .view(&app)
 }
 
 #[tauri::command]
-fn set_close_to_tray(app: AppHandle, state: tauri::State<'_, AppState>, enabled: bool) -> SettingsView {
+fn set_close_to_tray(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> SettingsView {
     state
         .update(|settings| settings.close_to_tray = enabled)
         .view(&app)
@@ -1347,9 +1360,17 @@ fn set_close_to_tray(app: AppHandle, state: tauri::State<'_, AppState>, enabled:
 /// Adds or removes the system's autostart entry (Linux: ~/.config/autostart, Windows:
 /// the Run key); it starts the app with --minimized.
 #[tauri::command]
-fn set_autostart(app: AppHandle, state: tauri::State<'_, AppState>, enabled: bool) -> Result<SettingsView, String> {
+fn set_autostart(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<SettingsView, String> {
     let autolaunch = app.autolaunch();
-    let changed = if enabled { autolaunch.enable() } else { autolaunch.disable() };
+    let changed = if enabled {
+        autolaunch.enable()
+    } else {
+        autolaunch.disable()
+    };
     changed.map_err(|error| format!("Could not change the autostart entry: {error}"))?;
     Ok(state.snapshot().view(&app))
 }
@@ -1521,7 +1542,15 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
         let Some(json) = json else {
             failures += 1;
             if failures >= POLL_MAX_FAILURES {
-                emit_activity(&app, &client_id, "error", format!("Cannot fetch the status of import {import_id}; please check again later."), None);
+                emit_activity(
+                    &app,
+                    &client_id,
+                    "error",
+                    format!(
+                        "Cannot fetch the status of import {import_id}; please check again later."
+                    ),
+                    None,
+                );
                 return;
             }
             continue;
@@ -1699,7 +1728,10 @@ async fn watch_and_upload(app: AppHandle) {
                 &client.id,
                 "pending",
                 if client.from_backup {
-                    format!("{}: found a backup with data not yet uploaded, starting upload.", client.label)
+                    format!(
+                        "{}: found a backup with data not yet uploaded, starting upload.",
+                        client.label
+                    )
                 } else {
                     format!("{}: new data written, starting upload.", client.label)
                 },
@@ -1739,7 +1771,10 @@ const MINIMIZED_ARG: &str = "--minimized";
 /// Copies `file` from the legacy directory next to `dir` unless `dir` already has one.
 fn migrate_legacy_file(dir: &Path, file: &str) {
     let target = dir.join(file);
-    let Some(legacy) = dir.parent().map(|parent| parent.join(LEGACY_IDENTIFIER).join(file)) else {
+    let Some(legacy) = dir
+        .parent()
+        .map(|parent| parent.join(LEGACY_IDENTIFIER).join(file))
+    else {
         return;
     };
     if target.exists() || !legacy.is_file() {
@@ -1752,7 +1787,10 @@ fn migrate_legacy_file(dir: &Path, file: &str) {
 /// Moves the legacy archive next to `dir` into `dir` unless `dir` already has one.
 fn migrate_legacy_archive(dir: &Path, name: &str) {
     let target = dir.join(name);
-    let Some(legacy) = dir.parent().map(|parent| parent.join(LEGACY_IDENTIFIER).join(name)) else {
+    let Some(legacy) = dir
+        .parent()
+        .map(|parent| parent.join(LEGACY_IDENTIFIER).join(name))
+    else {
         return;
     };
     if target.exists() || !legacy.is_dir() {
@@ -1822,7 +1860,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         // First, so a second start only shows the running instance and never spawns a second watcher.
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main_window(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            show_main_window(app)
+        }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![MINIMIZED_ARG]),
@@ -2105,7 +2145,11 @@ mod tests {
         };
         let (dirs, _, clients) = clients_among(&settings, vec![root.clone()], None);
         assert_eq!(dirs, vec![root.clone()]);
-        assert!(clients.is_empty(), "{:?}", clients.iter().map(|c| &c.id).collect::<Vec<_>>());
+        assert!(
+            clients.is_empty(),
+            "{:?}",
+            clients.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2144,14 +2188,23 @@ mod tests {
 
         migrate_legacy_file(&current, "settings.json");
         migrate_legacy_archive(&current, "archive");
-        assert_eq!(fs::read_to_string(current.join("settings.json")).unwrap(), "old");
-        assert_eq!(fs::read_to_string(current.join("archive/sub/a.lua")).unwrap(), "a");
+        assert_eq!(
+            fs::read_to_string(current.join("settings.json")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            fs::read_to_string(current.join("archive/sub/a.lua")).unwrap(),
+            "a"
+        );
 
         // Existing settings are never overwritten.
         fs::write(current.join("settings.json"), "new").unwrap();
         fs::write(legacy.join("settings.json"), "older").unwrap();
         migrate_legacy_file(&current, "settings.json");
-        assert_eq!(fs::read_to_string(current.join("settings.json")).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(current.join("settings.json")).unwrap(),
+            "new"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
