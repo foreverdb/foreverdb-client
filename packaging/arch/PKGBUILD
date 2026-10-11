@@ -3,7 +3,7 @@
 #   cd packaging/arch && makepkg -si
 # Keep pkgver in sync with package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json.
 pkgname=foreverdb-uploader
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB"
 arch=('x86_64')
