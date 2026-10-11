@@ -16,6 +16,10 @@ use serde_json::{Map, Value};
 /// descent would kill the whole app. Real snapshots nest about 6 levels deep.
 const MAX_DEPTH: usize = 200;
 
+/// Oldest SavedVariables format the server reads. Newer versions pass through: which ones the
+/// server understands is the worker's decision, so a schema bump needs no uploader release.
+const MIN_SCHEMA_VERSION: f64 = 9.0;
+
 /// Above this limit an `f64` no longer represents integers exactly.
 const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 
@@ -42,13 +46,16 @@ pub fn parse_forever_collect(source: &[u8]) -> Result<Value, String> {
 }
 
 fn validate(root: &Map<String, Value>) -> Result<(), String> {
-    match root.get("schemaVersion").and_then(Value::as_f64) {
-        Some(9.0) => {}
-        _ => {
-            return Err("Unsupported schemaVersion; only version 9 is accepted. \
-                 Please update the ForeverCollect addon."
-                .to_string())
-        }
+    let supported = root
+        .get("schemaVersion")
+        .and_then(Value::as_f64)
+        .is_some_and(|version| version.fract() == 0.0 && version >= MIN_SCHEMA_VERSION);
+    if !supported {
+        return Err(
+            "Unsupported schemaVersion; version 9 or newer is required. \
+             Please update the ForeverCollect addon."
+                .to_string(),
+        );
     }
     let catalogs = match root.get("catalogs") {
         Some(Value::Object(catalogs)) => catalogs.len(),
@@ -538,12 +545,24 @@ mod tests {
         assert_eq!(value["catalogs"]["2:11509:2:enUS:8"]["projectID"], 2);
     }
 
+    fn with_schema_version(version: &str) -> String {
+        format!(
+            "ForeverCollectDB = {{\n[\"schemaVersion\"] = {version},\n[\"catalogs\"] = {{ [\"k\"] = {{}} }},\n}}"
+        )
+    }
+
     #[test]
     fn rejects_an_unsupported_schema_version() {
-        let source =
-            "ForeverCollectDB = {\n[\"schemaVersion\"] = 8,\n[\"catalogs\"] = { [\"k\"] = {} },\n}";
-        let error = parse(source).unwrap_err();
-        assert!(error.contains("schemaVersion"), "{error}");
+        for version in ["8", "9.5", "\"9\""] {
+            let error = parse(&with_schema_version(version)).unwrap_err();
+            assert!(error.contains("schemaVersion"), "{version}: {error}");
+        }
+    }
+
+    #[test]
+    fn passes_newer_schema_versions_through() {
+        let value = parse(&with_schema_version("10")).unwrap();
+        assert_eq!(value["schemaVersion"], 10);
     }
 
     #[test]
