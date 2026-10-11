@@ -1,9 +1,9 @@
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -138,10 +138,10 @@ struct Settings {
     /// WoW installation directories the user added; their installed clients are active.
     #[serde(default)]
     extra_installations: Vec<String>,
-    /// Per client, the hash of the file uploaded last, so a file that could not
+    /// Per client, the SHA-256 of the file uploaded last, so a file that could not
     /// be removed (game still running) is not sent twice.
     #[serde(default)]
-    last_uploaded: HashMap<String, u64>,
+    last_upload_hash: HashMap<String, String>,
     /// Per client, the Unix time of the last successful upload. The upload removes the
     /// SavedVariables file, so this stands in for its timestamp when judging crash dumps.
     #[serde(default)]
@@ -157,6 +157,34 @@ impl Default for Settings {
     fn default() -> Self {
         serde_json::from_str("{}").expect("every field has a default")
     }
+}
+
+/// Settings from the content of settings.json, and whether it was unusable. An unusable file
+/// falls back to the defaults but keeps its user ID when it can still be read, so a damaged
+/// file never gives the uploader a new identity (the server blocks and deletes by that ID).
+fn parse_settings(content: &str) -> (Settings, bool) {
+    if let Ok(settings) = serde_json::from_str(content) {
+        return (settings, false);
+    }
+    let user_id = serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| value.get("user_id")?.as_str().map(str::to_string))
+        .filter(|id| !id.trim().is_empty());
+    (
+        Settings {
+            user_id,
+            ..Settings::default()
+        },
+        true,
+    )
+}
+
+/// SHA-256 of a file's content as hex: stable across builds, unlike `DefaultHasher`.
+fn content_hash(content: &[u8]) -> String {
+    Sha256::digest(content)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Creates the user ID if the settings have none yet; returns whether it did.
@@ -256,10 +284,31 @@ impl AppState {
     }
 
     fn load(path: PathBuf, archive_dir: PathBuf) -> Self {
-        let settings = fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default();
+        let settings = match fs::read(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+            read => {
+                let content = read
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_default();
+                let (settings, corrupt) = parse_settings(&content);
+                if corrupt {
+                    // Kept so nothing is lost when the next change rewrites settings.json.
+                    let backup = path.with_extension("json.corrupt");
+                    let _ = fs::copy(&path, &backup);
+                    let kept = if settings.user_id.is_some() {
+                        " (user ID kept)"
+                    } else {
+                        ""
+                    };
+                    eprintln!(
+                        "settings.json could not be read; kept as {} and started with defaults{kept}",
+                        backup.display()
+                    );
+                }
+                settings
+            }
+        };
         Self {
             settings: Mutex::new(settings),
             settings_path: path,
@@ -747,11 +796,8 @@ fn file_has_catalogs(path: &Path) -> bool {
     fs::read(path).is_ok_and(|source| snapshot_has_catalogs(&source))
 }
 
-fn file_hash(path: &Path) -> Option<u64> {
-    let content = fs::read(path).ok()?;
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    Some(hasher.finish())
+fn file_hash(path: &Path) -> Option<String> {
+    fs::read(path).ok().map(|content| content_hash(&content))
 }
 
 /// Version of a flavour folder: the launcher entry for its product in the
@@ -1086,10 +1132,10 @@ fn is_permanent_rejection(status: reqwest::StatusCode) -> bool {
 /// Remembers the content as handled so the watcher does not touch it again. `secured`
 /// tells a real upload from a permanent rejection: only the former moves the point in
 /// time from which the file counts as secured.
-fn remember_upload(state: &AppState, client_id: &str, content_hash: u64, secured: bool) {
+fn remember_upload(state: &AppState, client_id: &str, content_hash: String, secured: bool) {
     state.update(|settings| {
         settings
-            .last_uploaded
+            .last_upload_hash
             .insert(client_id.to_string(), content_hash);
         if secured {
             if let Some(now) = unix_seconds(std::time::SystemTime::now()) {
@@ -1122,9 +1168,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     })?;
     let content =
         fs::read(&source.path).map_err(|e| format!("Cannot read the file: {e}"))?;
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    let content_hash = hasher.finish();
+    let content_hash = content_hash(&content);
 
     // The server only accepts JSON. If the conversion fails, the snapshot itself is
     // broken or too new: archive it, mark it as handled (otherwise the watcher retries
@@ -1603,7 +1647,7 @@ async fn watch_and_upload(app: AppHandle) {
                 continue;
             };
             let already_uploaded = file_hash(&path)
-                .is_some_and(|hash| settings.last_uploaded.get(&client.id) == Some(&hash));
+                .is_some_and(|hash| settings.last_upload_hash.get(&client.id) == Some(&hash));
             if should_delete(already_uploaded, client.running) {
                 let main_path = saved_variables_path(Path::new(&client.id));
                 let source = SnapshotSource {
@@ -2298,6 +2342,53 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .ends_with("-0f8c-12ab.lua"));
+    }
+
+    #[test]
+    fn parses_valid_settings() {
+        let content = r#"{"auto_upload": false, "user_id": "u-1", "extra_clients": ["x"]}"#;
+        let (settings, corrupt) = parse_settings(content);
+        assert!(!corrupt);
+        assert!(!settings.auto_upload);
+        assert_eq!(settings.user_id.as_deref(), Some("u-1"));
+        assert_eq!(settings.extra_clients, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn keeps_the_user_id_of_settings_with_a_wrong_type() {
+        let (settings, corrupt) = parse_settings(r#"{"auto_upload": "yes", "user_id": "u-1"}"#);
+        assert!(corrupt);
+        assert_eq!(settings.user_id.as_deref(), Some("u-1"));
+        assert!(settings.auto_upload);
+    }
+
+    #[test]
+    fn falls_back_to_defaults_for_unreadable_settings() {
+        for content in ["", "not json", r#"{"user_id": 5}"#] {
+            let (settings, corrupt) = parse_settings(content);
+            assert!(corrupt, "{content:?}");
+            assert!(settings.user_id.is_none(), "{content:?}");
+        }
+    }
+
+    #[test]
+    fn keeps_corrupt_settings_and_their_user_id() {
+        let dir = temp_dir("corrupt-settings");
+        let path = dir.join("settings.json");
+        let content = r#"{"auto_upload": 1, "user_id": "u-1"}"#;
+        fs::write(&path, content).unwrap();
+        let state = AppState::load(path, dir.join("archive"));
+        assert_eq!(state.snapshot().user_id.as_deref(), Some("u-1"));
+        let backup = fs::read_to_string(dir.join("settings.json.corrupt")).unwrap();
+        assert_eq!(backup, content);
+    }
+
+    #[test]
+    fn hashes_content_with_sha256() {
+        assert_eq!(
+            content_hash(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
