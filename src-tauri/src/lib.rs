@@ -1613,9 +1613,17 @@ async fn watch_and_upload(app: AppHandle) {
                 if let Some(main_path) = main_path {
                     // No archive copy yet: retry it, and keep the file if that fails too.
                     if state.unarchived.lock().unwrap().contains(&client.id) {
-                        let archived = fs::read(&path).map_err(|e| e.to_string()).and_then(|content| {
-                            archive_snapshot(&state.archive_dir, &client.label, None, &content)
-                        });
+                        let archived =
+                            fs::read(&path)
+                                .map_err(|e| e.to_string())
+                                .and_then(|content| {
+                                    archive_snapshot(
+                                        &state.archive_dir,
+                                        &client.label,
+                                        None,
+                                        &content,
+                                    )
+                                });
                         if archived.is_err() {
                             continue;
                         }
@@ -2279,9 +2287,17 @@ mod tests {
         let dir = temp_dir("archive-id");
         let path = archive_snapshot(&dir, "Client", Some("../../evil"), b"data").unwrap();
         assert_eq!(path.parent().unwrap(), dir.as_path());
-        assert!(path.file_name().unwrap().to_string_lossy().ends_with("-upload.lua"));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-upload.lua"));
         let path = archive_snapshot(&dir, "Client", Some("0f8c-12ab"), b"data").unwrap();
-        assert!(path.file_name().unwrap().to_string_lossy().ends_with("-0f8c-12ab.lua"));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-0f8c-12ab.lua"));
     }
 
     #[test]
