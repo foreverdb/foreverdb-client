@@ -100,6 +100,8 @@ fn github_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .default_headers(headers)
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| format!("Could not create the HTTP client: {e}"))
 }

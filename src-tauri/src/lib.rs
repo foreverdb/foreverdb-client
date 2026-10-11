@@ -227,9 +227,34 @@ struct AppState {
     settings_path: PathBuf,
     archive_dir: PathBuf,
     release: Mutex<Option<ReleaseCache>>,
+    /// Clients whose last upload could not be archived; their files must not be deleted.
+    unarchived: Mutex<HashSet<String>>,
+    /// Clients with an upload in flight.
+    uploading: Mutex<HashSet<String>>,
+}
+
+/// Held for the length of one upload so the button and the watcher never send the same
+/// client's file twice.
+struct UploadSlot<'a> {
+    state: &'a AppState,
+    client_id: String,
+}
+
+impl Drop for UploadSlot<'_> {
+    fn drop(&mut self) {
+        self.state.uploading.lock().unwrap().remove(&self.client_id);
+    }
 }
 
 impl AppState {
+    fn try_start_upload(&self, client_id: &str) -> Option<UploadSlot<'_>> {
+        let mut uploading = self.uploading.lock().unwrap();
+        uploading.insert(client_id.to_string()).then(|| UploadSlot {
+            state: self,
+            client_id: client_id.to_string(),
+        })
+    }
+
     fn load(path: PathBuf, archive_dir: PathBuf) -> Self {
         let settings = fs::read_to_string(&path)
             .ok()
@@ -240,6 +265,8 @@ impl AppState {
             settings_path: path,
             archive_dir,
             release: Mutex::new(None),
+            unarchived: Mutex::new(HashSet::new()),
+            uploading: Mutex::new(HashSet::new()),
         }
     }
 
@@ -1029,6 +1056,12 @@ fn client_by_id(settings: &Settings, id: &str) -> Result<ClientDef, String> {
         .ok_or_else(|| format!("Client folder '{id}' can no longer be read."))
 }
 
+/// reqwest has no default timeout: a stalled upload would block the watcher for good.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Generous for 10 MiB on a slow line; the ingress rejects anything larger anyway.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Carries the user ID with every upload, so an admin can block a user and delete their data.
 const USER_HEADER: &str = "X-ForeverDB-User";
 
@@ -1069,6 +1102,9 @@ fn remember_upload(state: &AppState, client_id: &str, content_hash: u64, secured
 /// Uploads the client's SavedVariables (or their .bak, see `snapshot_source`), keeps an
 /// archive copy, and removes the uploaded data so the next session starts empty.
 async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult, String> {
+    let Some(_slot) = state.try_start_upload(client_id) else {
+        return Err("An upload for this client is already running.".to_string());
+    };
     let def = client_by_id(&state.snapshot(), client_id)?;
     let client_dir = Path::new(&def.id);
     let main_path = saved_variables_path(client_dir).ok_or_else(|| {
@@ -1096,7 +1132,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let snapshot = match lua::parse_forever_collect(&content) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            archive_snapshot(&state.archive_dir, &def.label, None, &content);
+            let _ = archive_snapshot(&state.archive_dir, &def.label, None, &content);
             remember_upload(state, client_id, content_hash, false);
             return Err(format!("Could not read the snapshot: {error}"));
         }
@@ -1106,7 +1142,12 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let compressed = gzip(&payload).map_err(|e| format!("Could not prepare the upload: {e}"))?;
 
     let user_id = state.user_id();
-    let response = reqwest::Client::new()
+    let http = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(UPLOAD_TIMEOUT)
+        .build()
+        .map_err(|e| format!("Could not create the HTTP client: {e}"))?;
+    let response = http
         .post(target_url())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(reqwest::header::CONTENT_ENCODING, "gzip")
@@ -1121,7 +1162,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     if !status.is_success() {
         // A permanent rejection always repeats itself for the same content.
         if is_permanent_rejection(status) {
-            archive_snapshot(&state.archive_dir, &def.label, None, &content);
+            let _ = archive_snapshot(&state.archive_dir, &def.label, None, &content);
             remember_upload(state, client_id, content_hash, false);
         }
         return Err(format!(
@@ -1134,15 +1175,25 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
         .ok()
         .and_then(|json| json.get("id").and_then(|id| id.as_str()).map(str::to_owned));
     remember_upload(state, client_id, content_hash, true);
-    archive_snapshot(
+    let archived = archive_snapshot(
         &state.archive_dir,
         &def.label,
         import_id.as_deref(),
         &content,
     );
+    {
+        let mut unarchived = state.unarchived.lock().unwrap();
+        if archived.is_ok() {
+            unarchived.remove(client_id);
+        } else {
+            unarchived.insert(client_id.to_string());
+        }
+    }
 
     let running = wow_is_running(&def.process);
-    let deleted = delete_uploaded_snapshot(&source, &main_path, running);
+    // Without an archive copy the SavedVariables are the only copy left if the server later
+    // fails the import, so they stay until a later upload archives successfully.
+    let deleted = archived.is_ok() && delete_uploaded_snapshot(&source, &main_path, running);
     Ok(UploadResult {
         import_id,
         file_path: source.path.to_string_lossy().into_owned(),
@@ -1171,10 +1222,14 @@ const ARCHIVE_LIMIT: usize = 30;
 
 /// Keeps a copy of every uploaded snapshot so nothing is lost even if the server
 /// rejects or loses an import; only the newest ARCHIVE_LIMIT copies are kept.
-fn archive_snapshot(archive_dir: &Path, label: &str, import_id: Option<&str>, content: &[u8]) {
-    if fs::create_dir_all(archive_dir).is_err() {
-        return;
-    }
+fn archive_snapshot(
+    archive_dir: &Path,
+    label: &str,
+    import_id: Option<&str>,
+    content: &[u8],
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(archive_dir)
+        .map_err(|e| format!("Could not create the archive folder: {e}"))?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1182,9 +1237,10 @@ fn archive_snapshot(archive_dir: &Path, label: &str, import_id: Option<&str>, co
     let name = format!(
         "{stamp}-{}-{}.lua",
         label.replace(' ', "_"),
-        import_id.unwrap_or("upload")
+        archive_id(import_id)
     );
-    let _ = fs::write(archive_dir.join(name), content);
+    let archived = archive_dir.join(name);
+    fs::write(&archived, content).map_err(|e| format!("Could not write the archive copy: {e}"))?;
     let mut files: Vec<PathBuf> = fs::read_dir(archive_dir)
         .into_iter()
         .flatten()
@@ -1195,6 +1251,22 @@ fn archive_snapshot(archive_dir: &Path, label: &str, import_id: Option<&str>, co
     files.sort();
     for old in files.iter().take(files.len().saturating_sub(ARCHIVE_LIMIT)) {
         let _ = fs::remove_file(old);
+    }
+    Ok(archived)
+}
+
+/// The import id comes from the server and ends up in a file name, so anything but a
+/// plain id is replaced.
+fn archive_id(import_id: Option<&str>) -> &str {
+    match import_id {
+        Some(id)
+            if !id.is_empty()
+                && id.len() <= 64
+                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') =>
+        {
+            id
+        }
+        _ => "upload",
     }
 }
 
@@ -1372,7 +1444,13 @@ const POLL_MAX_FAILURES: u32 = 10;
 /// reports every status change to the window.
 async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
     let url = status_url(&target_url(), &import_id);
-    let http = reqwest::Client::new();
+    let Ok(http) = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(POLL_REQUEST_TIMEOUT)
+        .build()
+    else {
+        return;
+    };
     let started = std::time::Instant::now();
     let mut last_status = String::from("queued");
     let mut failures = 0;
@@ -1533,6 +1611,16 @@ async fn watch_and_upload(app: AppHandle) {
                     from_backup: client.from_backup,
                 };
                 if let Some(main_path) = main_path {
+                    // No archive copy yet: retry it, and keep the file if that fails too.
+                    if state.unarchived.lock().unwrap().contains(&client.id) {
+                        let archived = fs::read(&path).map_err(|e| e.to_string()).and_then(|content| {
+                            archive_snapshot(&state.archive_dir, &client.label, None, &content)
+                        });
+                        if archived.is_err() {
+                            continue;
+                        }
+                        state.unarchived.lock().unwrap().remove(&client.id);
+                    }
                     if delete_uploaded_snapshot(&source, &main_path, false) {
                         emit_activity(
                             &app,
@@ -1549,6 +1637,9 @@ async fn watch_and_upload(app: AppHandle) {
                 continue;
             }
             if !should_upload(client.file_has_data, is_settled(&path), already_uploaded) {
+                continue;
+            }
+            if state.uploading.lock().unwrap().contains(&client.id) {
                 continue;
             }
             emit_activity(
@@ -2173,5 +2264,35 @@ mod tests {
                 "an installation should expose at least one client"
             );
         }
+    }
+
+    #[test]
+    fn archive_snapshot_reports_write_failure() {
+        let dir = temp_dir("archive-failure");
+        let blocker = dir.join("not-a-dir");
+        fs::write(&blocker, b"x").unwrap();
+        assert!(archive_snapshot(&blocker, "Client", None, b"data").is_err());
+    }
+
+    #[test]
+    fn archive_snapshot_writes_and_sanitizes_id() {
+        let dir = temp_dir("archive-id");
+        let path = archive_snapshot(&dir, "Client", Some("../../evil"), b"data").unwrap();
+        assert_eq!(path.parent().unwrap(), dir.as_path());
+        assert!(path.file_name().unwrap().to_string_lossy().ends_with("-upload.lua"));
+        let path = archive_snapshot(&dir, "Client", Some("0f8c-12ab"), b"data").unwrap();
+        assert!(path.file_name().unwrap().to_string_lossy().ends_with("-0f8c-12ab.lua"));
+    }
+
+    #[test]
+    fn upload_slot_is_exclusive_per_client() {
+        let dir = temp_dir("upload-slot");
+        let state = AppState::load(dir.join("settings.json"), dir.join("archive"));
+        let first = state.try_start_upload("a");
+        assert!(first.is_some());
+        assert!(state.try_start_upload("a").is_none());
+        assert!(state.try_start_upload("b").is_some());
+        drop(first);
+        assert!(state.try_start_upload("a").is_some());
     }
 }
