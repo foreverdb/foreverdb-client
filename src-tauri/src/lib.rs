@@ -260,6 +260,15 @@ struct AppState {
     unarchived: Mutex<HashSet<String>>,
     /// Clients with an upload in flight.
     uploading: Mutex<HashSet<String>>,
+    /// Clients whose last upload failed transiently: when the watcher may try again and
+    /// how many attempts failed in a row.
+    retry: Mutex<HashMap<String, RetryState>>,
+}
+
+#[derive(Clone, Copy)]
+struct RetryState {
+    attempts: u32,
+    not_before: std::time::Instant,
 }
 
 /// Held for the length of one upload so the button and the watcher never send the same
@@ -317,7 +326,35 @@ impl AppState {
             release: Mutex::new(None),
             unarchived: Mutex::new(HashSet::new()),
             uploading: Mutex::new(HashSet::new()),
+            retry: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Holds the watcher back after a transient failure, honouring the server's
+    /// Retry-After when it sent one.
+    fn defer_retry(&self, client_id: &str, retry_after: Option<Duration>) {
+        let mut retry = self.retry.lock().unwrap();
+        let attempts = retry.get(client_id).map_or(0, |state| state.attempts) + 1;
+        let delay = retry_after.unwrap_or_else(|| retry_delay(attempts));
+        retry.insert(
+            client_id.to_string(),
+            RetryState {
+                attempts,
+                not_before: std::time::Instant::now() + delay,
+            },
+        );
+    }
+
+    fn clear_retry(&self, client_id: &str) {
+        self.retry.lock().unwrap().remove(client_id);
+    }
+
+    fn retry_due(&self, client_id: &str) -> bool {
+        self.retry
+            .lock()
+            .unwrap()
+            .get(client_id)
+            .is_none_or(|state| std::time::Instant::now() >= state.not_before)
     }
 
     fn cached_release(&self) -> Option<AddonRelease> {
@@ -1116,6 +1153,33 @@ const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Carries the user ID with every upload, so an admin can block a user and delete their data.
 const USER_HEADER: &str = "X-ForeverDB-User";
 
+/// SHA-256 of the body as sent: the ingress refuses a body that does not match, and
+/// recognises a repeated upload of the same content by it.
+const CONTENT_HASH_HEADER: &str = "X-ForeverDB-Content-SHA256";
+
+const RETRY_BASE: Duration = Duration::from_secs(3);
+const RETRY_MAX: Duration = Duration::from_secs(300);
+
+/// Exponential backoff after `attempts` transient failures in a row: 3 s, 6 s, 12 s, … up
+/// to five minutes.
+fn retry_delay(attempts: u32) -> Duration {
+    RETRY_BASE
+        .saturating_mul(1u32 << attempts.saturating_sub(1).min(16))
+        .min(RETRY_MAX)
+}
+
+/// Reads Retry-After in its seconds form; the HTTP-date form is not sent by the ingress.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| Duration::from_secs(seconds).min(RETRY_MAX))
+}
+
 /// Identifies the upload to the ingress; it ends up in `import_jobs.source`, so a
 /// parser regression can be traced to a client release.
 const CLIENT_TAG: &str = concat!("foreverdb-uploader/", env!("CARGO_PKG_VERSION"));
@@ -1202,17 +1266,25 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
         .header(reqwest::header::CONTENT_ENCODING, "gzip")
         .header("X-ForeverDB-Client", CLIENT_TAG)
         .header(USER_HEADER, user_id)
+        .header(CONTENT_HASH_HEADER, self::content_hash(&compressed))
         .body(compressed)
         .send()
         .await
-        .map_err(|e| format!("Upload failed: {e}"))?;
+        .map_err(|e| {
+            state.defer_retry(client_id, None);
+            format!("Upload failed: {e}")
+        })?;
     let status = response.status();
+    let wait = retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
         // A permanent rejection always repeats itself for the same content.
         if is_permanent_rejection(status) {
+            state.clear_retry(client_id);
             let _ = archive_snapshot(&state.archive_dir, &def.label, None, &content);
             remember_upload(state, client_id, content_hash, false);
+        } else {
+            state.defer_retry(client_id, wait);
         }
         return Err(format!(
             "The server rejected the upload ({}): {}",
@@ -1223,6 +1295,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let import_id = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|json| json.get("id").and_then(|id| id.as_str()).map(str::to_owned));
+    state.clear_retry(client_id);
     remember_upload(state, client_id, content_hash, true);
     let archived = archive_snapshot(
         &state.archive_dir,
@@ -1720,7 +1793,8 @@ async fn watch_and_upload(app: AppHandle) {
             if !should_upload(client.file_has_data, is_settled(&path), already_uploaded) {
                 continue;
             }
-            if state.uploading.lock().unwrap().contains(&client.id) {
+            if state.uploading.lock().unwrap().contains(&client.id) || !state.retry_due(&client.id)
+            {
                 continue;
             }
             emit_activity(
@@ -2454,5 +2528,44 @@ mod tests {
         assert!(state.try_start_upload("b").is_some());
         drop(first);
         assert!(state.try_start_upload("a").is_some());
+    }
+
+    #[test]
+    fn retry_delay_doubles_up_to_five_minutes() {
+        assert_eq!(retry_delay(1), Duration::from_secs(3));
+        assert_eq!(retry_delay(2), Duration::from_secs(6));
+        assert_eq!(retry_delay(5), Duration::from_secs(48));
+        assert_eq!(retry_delay(8), RETRY_MAX);
+        assert_eq!(retry_delay(u32::MAX), RETRY_MAX);
+    }
+
+    #[test]
+    fn reads_retry_after_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after(&headers), None);
+        headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(Duration::from_secs(30)));
+        headers.insert(reqwest::header::RETRY_AFTER, "86400".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(RETRY_MAX));
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after(&headers), None);
+    }
+
+    #[test]
+    fn transient_failures_hold_the_watcher_back() {
+        let dir = temp_dir("retry");
+        let state = AppState::load(dir.join("settings.json"), dir.join("archive"));
+        assert!(state.retry_due("a"));
+        state.defer_retry("a", None);
+        assert!(!state.retry_due("a"));
+        assert!(state.retry_due("b"));
+        state.defer_retry("a", Some(Duration::ZERO));
+        assert!(state.retry_due("a"));
+        assert_eq!(state.retry.lock().unwrap()["a"].attempts, 2);
+        state.clear_retry("a");
+        assert!(!state.retry.lock().unwrap().contains_key("a"));
     }
 }
