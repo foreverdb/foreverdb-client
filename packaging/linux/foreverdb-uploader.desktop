@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=ForeverDB Uploader
-Comment=Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB
+Comment=Uploads ForeverCollect SavedVariables from World of Warcraft: Forever and Classic Hardcore to ForeverDB
 Exec=foreverdb-uploader
 Icon=foreverdb-uploader
 Terminal=false

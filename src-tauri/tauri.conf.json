@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ForeverDB Uploader",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "gg.foreverdb.client",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -32,8 +32,8 @@
     "homepage": "https://github.com/foreverdb/foreverdb",
     "license": "MIT",
     "licenseFile": "../LICENSE",
-    "shortDescription": "Uploads ForeverCollect SavedVariables from World of Warcraft: Forever to ForeverDB",
-    "longDescription": "Desktop uploader for the SavedVariables of the ForeverCollect addon. Detects the World of Warcraft: Forever client (Wine, Lutris, Faugus, Bottles, Windows), watches its ForeverCollect.lua and uploads every new write to the ForeverDB ingress automatically; every upload keeps an archive copy. Classic, Classic Era and Retail are not supported yet.",
+    "shortDescription": "Uploads ForeverCollect SavedVariables from World of Warcraft",
+    "longDescription": "Desktop uploader for the SavedVariables of the ForeverCollect addon. Detects the World of Warcraft clients (Wine, Lutris, Faugus, Bottles, Windows), watches their ForeverCollect.lua and uploads every new write to the ForeverDB ingress automatically; every upload keeps an archive copy.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

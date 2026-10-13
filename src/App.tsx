@@ -196,7 +196,7 @@ function App() {
   }
 
   async function chooseFolder() {
-    const picked = await open({ directory: true, multiple: false, title: "Choose your WoW installation (\"World of Warcraft\") or its Forever folder (_classic_beta_)" });
+    const picked = await open({ directory: true, multiple: false, title: "Choose your WoW installation (\"World of Warcraft\") or a client folder (_classic_beta_ or _classic_era_)" });
     if (typeof picked === "string") await addClient(picked);
   }
 
@@ -265,7 +265,7 @@ function App() {
 
       <section className="intro">
         <p>
-          ForeverCollect records what you see in World of Warcraft: Forever. Every time the game writes its data (logout, /reload, exit),
+          ForeverCollect records what you see in World of Warcraft: Forever and Classic Hardcore. Every time the game writes its data (logout, /reload, exit),
           the uploader sends it to ForeverDB and keeps a copy in its archive.
         </p>
         <label className="switch">
@@ -289,7 +289,7 @@ function App() {
 
       {installation && installation.wow_dir === null && clients.length === 0 && (
         <div className="notice error">
-          <strong>No World of Warcraft: Forever installation found</strong>
+          <strong>No supported World of Warcraft installation found</strong>
           <span>Searched in:</span>
           <ul className="paths">{installation.searched.map((path) => <li key={path}>{path}</li>)}</ul>
           <small>Set FOREVERDB_WOW_DIR or choose the installation folder.</small>
@@ -304,15 +304,15 @@ function App() {
               <span className="step">01</span>
               <div>
                 <h2>Game client</h2>
-                <p>Only World of Warcraft: Forever is supported. Classic, Classic Era and Retail are not supported yet.</p>
+                <p>World of Warcraft: Forever and Classic Era / Hardcore are supported. Retail and the other Classic versions are not supported yet.</p>
               </div>
-              <button className="link" onClick={openAddDialog}>+ Add Forever client</button>
+              <button className="link" onClick={openAddDialog}>+ Add client</button>
             </div>
             {clients.length === 0 && (
-              <p className="muted">No Forever client found. Add its _classic_beta_ folder or the WoW installation that contains it.</p>
+              <p className="muted">No supported client found. Add its _classic_beta_ or _classic_era_ folder or the WoW installation that contains it.</p>
             )}
             {clients.length > 0 && (
-              <div className="client-tabs" role={clients.length > 1 ? "tablist" : undefined} aria-label="Forever client">
+              <div className="client-tabs" role={clients.length > 1 ? "tablist" : undefined} aria-label="Game client">
                 {clients.length === 1 ? (
                   <div className="client-tab active">
                     <strong>{clients[0].label}</strong>
@@ -454,11 +454,11 @@ function App() {
           <div className="dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
             <div className="section-heading">
               <div>
-                <h2>Add Forever client</h2>
-                <p>Forever clients of the installations found, or choose a WoW installation ("World of Warcraft") or its _classic_beta_ folder yourself.</p>
+                <h2>Add client</h2>
+                <p>Supported clients of the installations found, or choose a WoW installation ("World of Warcraft") or its _classic_beta_ or _classic_era_ folder yourself.</p>
               </div>
             </div>
-            {dialog.candidates.length === 0 && <p className="muted">No further Forever clients found in the known installations.</p>}
+            {dialog.candidates.length === 0 && <p className="muted">No further supported clients found in the known installations.</p>}
             <ul className="candidates">
               {dialog.candidates.map((candidate) => (
                 <li key={candidate.id}>

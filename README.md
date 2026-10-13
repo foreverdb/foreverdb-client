@@ -1,6 +1,6 @@
 # ForeverDB Uploader
 
-Desktop uploader for the ForeverCollect SavedVariables of **World of Warcraft: Forever**. Only the Forever client (the `_classic_beta_` folder, product `wow_classic_beta`) is supported; Classic, Classic Era and Retail are not supported yet. Their folders are ignored during detection and rejected when chosen by hand.
+Desktop uploader for the ForeverCollect SavedVariables of **World of Warcraft: Forever** and **Classic Hardcore**. Supported are the Forever client (the `_classic_beta_` folder, product `wow_classic_beta`) and the Classic Era client (the `_classic_era_` folder, product `wow_classic_era`), which also runs Hardcore; the server tells them apart by season. Retail and the other Classic versions are not supported yet. Their folders are ignored during detection and rejected when chosen by hand.
 
 Development: `pnpm tauri dev`. Build: `pnpm tauri build`.
 
@@ -14,9 +14,9 @@ The window follows the order in which things have to happen:
    - It looks in Faugus, Lutris, Wine, Bottles, Windows and macOS locations.
    - On Windows it also reads the launcher's registry entries (`HKLM\SOFTWARE\WOW6432Node\Blizzard Entertainment\World of Warcraft`) and checks `%ProgramFiles(x86)%\World of Warcraft`, `<drive>:\World of Warcraft` and `<drive>:\Games\World of Warcraft` on every fixed drive.
 
-   It then shows the Forever client the launcher lists as installed, with its version. A client is a flavour folder: `.flavor.info` names the product, and `Wow*.exe` is the process to watch. If nothing is found, "+ Add Forever client" lets you:
-   - activate Forever folders of the installations that were found, or
-   - pick a whole WoW installation (the "World of Warcraft" folder) or its `_classic_beta_` folder with the native folder dialog.
+   It then shows the supported clients the launcher lists as installed, with their versions; several clients appear as tabs. A client is a flavour folder: `.flavor.info` names the product, and `Wow*.exe` is the process to watch. If nothing is found, "+ Add client" lets you:
+   - activate supported client folders of the installations that were found, or
+   - pick a whole WoW installation (the "World of Warcraft" folder) or its `_classic_beta_` or `_classic_era_` folder with the native folder dialog.
 
    Your choice is stored in `settings.json`.
 2. **ForeverCollect addon.** Shows the installed addon version next to the latest release and installs or updates it with one click (see "Addon updates").

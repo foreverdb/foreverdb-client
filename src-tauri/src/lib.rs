@@ -19,23 +19,24 @@ use addon::AddonRelease;
 
 // The user only picks a WoW client; installation directory, account, file and
 // upload target are derived. A client is a flavour folder such as
-// "_classic_beta_": its ".flavor.info" names the product, the "Wow*.exe" in it
+// "_classic_beta_" or "_classic_era_": its ".flavor.info" names the product, the "Wow*.exe" in it
 // the process to watch, and the launcher's ".build.info" the installed version.
 
 const DEFAULT_TARGET_URL: &str =
     "https://foreverdb-ingress.kube.alexbangert.dev/imports/forevercollect";
 
-/// The only product the client works with: Forever runs in the "_classic_beta_" folder.
-/// Classic, Classic Era and Retail are not supported yet.
-const SUPPORTED_PRODUCT: &str = "wow_classic_beta";
+/// The products the client works with: Forever runs in the "_classic_beta_" folder,
+/// Classic Era and Hardcore share the "_classic_era_" folder (the season tells them
+/// apart on the server). Retail and the other Classic versions are not supported yet.
+const SUPPORTED_PRODUCTS: &[&str] = &["wow_classic_beta", "wow_classic_era"];
 
 fn is_supported(def: &ClientDef) -> bool {
-    def.product == SUPPORTED_PRODUCT
+    SUPPORTED_PRODUCTS.contains(&def.product.as_str())
 }
 
 fn unsupported_message(def: &ClientDef) -> String {
     format!(
-        "'{}' is a {} client. Only Forever is supported; Classic, Classic Era and Retail are not supported yet.",
+        "'{}' is a {} client. Only Forever and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
         def.id, def.label
     )
 }
@@ -45,7 +46,7 @@ fn unsupported_message(def: &ClientDef) -> String {
 fn product_label(product: &str) -> String {
     match product {
         "wow_classic_beta" => "Forever",
-        "wow_classic_era" => "Classic Era",
+        "wow_classic_era" => "Classic Era & Hardcore",
         "wow_classic_era_ptr" => "Classic Era PTR",
         "wow_classic" => "Classic",
         "wow_classic_ptr" => "Classic PTR",
@@ -976,8 +977,7 @@ fn clients_among(
         if seen.contains(extra) {
             continue;
         }
-        // Entries from before the client was limited to Forever stay in the settings
-        // but are ignored.
+        // Entries of unsupported flavours stay in the settings but are ignored.
         let Some(def) = client_from_dir(Path::new(extra)).filter(is_supported) else {
             continue;
         };
@@ -1005,7 +1005,7 @@ fn detect_installation(state: tauri::State<'_, AppState>) -> Installation {
     }
 }
 
-/// Forever folders that are not active yet, from the detected installation and any
+/// Supported client folders that are not active yet, from the detected installation and any
 /// other installation found in the candidate directories.
 #[tauri::command]
 fn list_client_candidates(state: tauri::State<'_, AppState>) -> Vec<ClientCandidate> {
@@ -1038,10 +1038,10 @@ fn list_client_candidates(state: tauri::State<'_, AppState>) -> Vec<ClientCandid
     candidates
 }
 
-/// Registers a folder chosen by the user: a Forever folder becomes an extra client, a
-/// WoW installation folder ("World of Warcraft", holding .build.info or flavour
-/// folders) an extra installation whose installed Forever client is active from then
-/// on. Folders of other flavours are rejected.
+/// Registers a folder chosen by the user: a supported client folder becomes an extra
+/// client, a WoW installation folder ("World of Warcraft", holding .build.info or
+/// flavour folders) an extra installation whose installed supported clients are active
+/// from then on. Folders of other flavours are rejected.
 fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, String> {
     if let Some(def) = client_from_dir(path) {
         if !is_supported(&def) {
@@ -1062,10 +1062,10 @@ fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, Strin
             path.display()
         ));
     }
-    let forever: Vec<ClientDef> = flavours.into_iter().filter(is_supported).collect();
-    if forever.is_empty() {
+    let supported: Vec<ClientDef> = flavours.into_iter().filter(is_supported).collect();
+    if supported.is_empty() {
         return Err(format!(
-            "'{}' contains no Forever client (_classic_beta_). Only Forever is supported; Classic, Classic Era and Retail are not supported yet.",
+            "'{}' contains no supported client (_classic_beta_ or _classic_era_). Only Forever and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
             path.display()
         ));
     }
@@ -1075,7 +1075,7 @@ fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, Strin
     }
     // Without a launcher file nothing counts as installed, so activate the flavours themselves.
     if !is_wow_dir(path) {
-        for def in forever {
+        for def in supported {
             if !settings.extra_clients.contains(&def.id) {
                 settings.extra_clients.push(def.id);
             }
@@ -2138,23 +2138,26 @@ mod tests {
         let root = temp_dir("register");
         let era = fake_flavour(&root, "_classic_era_", "wow_classic_era", "WowClassic.exe");
         let beta = fake_flavour(&root, "_classic_beta_", "wow_classic_beta", "WowB.exe");
+        let retail = fake_flavour(&root, "_retail_", "wow", "Wow.exe");
 
-        // a Forever folder becomes an extra client
-        let mut settings = Settings::default();
-        register_folder(&mut settings, &beta).unwrap();
-        assert_eq!(
-            settings.extra_clients,
-            vec![beta.to_string_lossy().into_owned()]
-        );
-        assert!(settings.extra_installations.is_empty());
+        // a Forever or Classic Era / Hardcore folder becomes an extra client
+        for dir in [&beta, &era] {
+            let mut settings = Settings::default();
+            register_folder(&mut settings, dir).unwrap();
+            assert_eq!(
+                settings.extra_clients,
+                vec![dir.to_string_lossy().into_owned()]
+            );
+            assert!(settings.extra_installations.is_empty());
+        }
 
         // other flavours are rejected
         let mut settings = Settings::default();
-        let error = register_folder(&mut settings, &era).unwrap_err();
-        assert!(error.contains("Only Forever is supported"), "{error}");
+        let error = register_folder(&mut settings, &retail).unwrap_err();
+        assert!(error.contains("Only Forever and Classic Era"), "{error}");
         assert!(settings.extra_clients.is_empty());
 
-        // an installation without launcher file activates only its Forever folder
+        // an installation without launcher file activates its supported folders
         let mut settings = Settings::default();
         register_folder(&mut settings, &root).unwrap();
         assert_eq!(
@@ -2163,7 +2166,10 @@ mod tests {
         );
         assert_eq!(
             settings.extra_clients,
-            vec![beta.to_string_lossy().into_owned()]
+            vec![
+                beta.to_string_lossy().into_owned(),
+                era.to_string_lossy().into_owned()
+            ]
         );
 
         // with a launcher file only the installed products count, via the installation
@@ -2198,22 +2204,22 @@ mod tests {
     fn ignores_and_rejects_other_flavours() {
         let root = temp_dir("other-flavours");
         let retail = fake_flavour(&root, "_retail_", "wow", "Wow.exe");
-        let era = fake_flavour(&root, "_classic_era_", "wow_classic_era", "WowClassic.exe");
+        let classic = fake_flavour(&root, "_classic_", "wow_classic", "WowClassic.exe");
         fs::write(
             root.join(".build.info"),
-            "Version!STRING:0|Product!STRING:0\n12.1.0.69814|wow\n1.15.7.61582|wow_classic_era\n",
+            "Version!STRING:0|Product!STRING:0\n12.1.0.69814|wow\n5.5.1.63538|wow_classic\n",
         )
         .unwrap();
 
         // an installation with only other flavours cannot be added
         let error = register_folder(&mut Settings::default(), &root).unwrap_err();
-        assert!(error.contains("no Forever client"), "{error}");
+        assert!(error.contains("no supported client"), "{error}");
 
         // installed or previously added clients of other flavours are ignored
         let settings = Settings {
             extra_clients: vec![
                 retail.to_string_lossy().into_owned(),
-                era.to_string_lossy().into_owned(),
+                classic.to_string_lossy().into_owned(),
             ],
             ..Settings::default()
         };
@@ -2223,6 +2229,31 @@ mod tests {
             clients.is_empty(),
             "{:?}",
             clients.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn detects_installed_classic_era_clients() {
+        let root = temp_dir("classic-era");
+        let era = fake_flavour(&root, "_classic_era_", "wow_classic_era", "WowClassic.exe");
+        fs::write(
+            root.join(".build.info"),
+            "Version!STRING:0|Product!STRING:0\n1.15.7.61582|wow_classic_era\n",
+        )
+        .unwrap();
+        let def = client_from_dir(&era).unwrap();
+        assert_eq!(
+            (def.label.as_str(), def.process.as_str()),
+            ("Classic Era & Hardcore", "WowClassic.exe")
+        );
+        let (_, _, clients) = clients_among(&Settings::default(), vec![root.clone()], None);
+        assert_eq!(
+            clients
+                .iter()
+                .map(|c| (c.id.as_str(), c.version.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(era.to_string_lossy().as_ref(), Some("1.15.7.61582"))]
         );
         fs::remove_dir_all(&root).unwrap();
     }
