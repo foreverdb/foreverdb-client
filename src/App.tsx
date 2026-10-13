@@ -256,18 +256,20 @@ function App() {
   return (
     <main className="shell">
       <header className="masthead">
-        <div className="mark">F<span>DB</span></div>
-        <div>
-          <p className="eyebrow">ForeverCollect / Desktop uploader</p>
-          <h1>Upload your collected data.</h1>
-        </div>
+        <span className="wordmark">ForeverDB</span>
+        <span className="masthead-tag">Uploader</span>
       </header>
 
-      <section className="intro">
-        <p>
-          ForeverCollect records what you see in World of Warcraft: Forever and Classic Hardcore. Every time the game writes its data (logout, /reload, exit),
+      <section className="hero">
+        <p className="eyebrow">ForeverCollect · Desktop uploader</p>
+        <h1>Upload your collected data.</h1>
+        <p className="lead">
+          ForeverCollect records what you see in World of Warcraft. Every time the game writes its data (logout, /reload, exit),
           the uploader sends it to ForeverDB and keeps a copy in its archive.
         </p>
+      </section>
+
+      <section className="intro">
         <label className="switch">
           <input type="checkbox" checked={settings?.auto_upload ?? true} onChange={() => settings && void toggleSetting("set_auto_upload", !settings.auto_upload)} disabled={settings === null} />
           <span className="track" />
