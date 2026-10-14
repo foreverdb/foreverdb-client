@@ -22,8 +22,7 @@ use addon::AddonRelease;
 // "_classic_beta_" or "_classic_era_": its ".flavor.info" names the product, the "Wow*.exe" in it
 // the process to watch, and the launcher's ".build.info" the installed version.
 
-const DEFAULT_TARGET_URL: &str =
-    "https://foreverdb-ingress.kube.alexbangert.dev/imports/forevercollect";
+const DEFAULT_TARGET_URL: &str = "https://upload.foreverdb.app/imports/forevercollect";
 
 /// The products the client works with: Forever runs in the "_classic_beta_" folder,
 /// Classic Era and Hardcore share the "_classic_era_" folder (the season tells them
