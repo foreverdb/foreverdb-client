@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -42,7 +42,7 @@ type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
 type UploadResult = { import_id: string | null; file_path: string; running: boolean; deleted: boolean };
-type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; repository: string };
+type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; repository: string; linked_account: string | null };
 type ImportStatus = { import_id: string; status: "queued" | "processing" | "completed" | "failed"; error: string | null };
 type Activity = {
   client: string;
@@ -93,6 +93,9 @@ function App() {
   const [releaseError, setReleaseError] = useState("");
   const [installing, setInstalling] = useState(false);
   const [installed, setInstalled] = useState<InstallResult | null>(null);
+  const [pairingCode, setPairingCode] = useState("");
+  const [linking, setLinking] = useState(false);
+  const [linkError, setLinkError] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -218,6 +221,20 @@ function App() {
     }
   }
 
+  async function linkAccount(event: FormEvent) {
+    event.preventDefault();
+    setLinking(true);
+    setLinkError("");
+    try {
+      setSettings(await invoke<Settings>("link_account", { code: pairingCode }));
+      setPairingCode("");
+    } catch (message) {
+      setLinkError(String(message));
+    } finally {
+      setLinking(false);
+    }
+  }
+
   const client = installation?.clients.find((entry) => entry.id === selected) ?? null;
 
   /** The polled status, but only while it still belongs to the shown upload. */
@@ -285,6 +302,28 @@ function App() {
           <span className="track" />
           <span>Closing the window keeps the uploader running in the tray</span>
         </label>
+        <form className="account" onSubmit={(event) => void linkAccount(event)}>
+          <span>
+            {settings?.linked_account
+              ? <>Linked to <strong>{settings.linked_account}</strong></>
+              : "Link this uploader to your ForeverDB account to see your characters in your profile."}
+          </span>
+          <div className="account-row">
+            <input
+              value={pairingCode}
+              onChange={(event) => setPairingCode(event.target.value)}
+              placeholder="Pairing code from your profile"
+              aria-label="Pairing code"
+              autoComplete="off"
+              spellCheck={false}
+              disabled={linking}
+            />
+            <button className="secondary" type="submit" disabled={linking || pairingCode.trim() === ""}>
+              {linking ? "Linking …" : "Link"}
+            </button>
+          </div>
+          {linkError && <small className="account-error">{linkError}</small>}
+        </form>
       </section>
 
       {installation === null && <div className="card"><p className="muted">Looking for World of Warcraft ...</p></div>}

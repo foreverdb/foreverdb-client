@@ -23,6 +23,8 @@ use addon::AddonRelease;
 // the process to watch, and the launcher's ".build.info" the installed version.
 
 const DEFAULT_TARGET_URL: &str = "https://upload.foreverdb.app/imports/forevercollect";
+/// The website's API; the uploader only calls it to link itself to an account.
+const DEFAULT_API_URL: &str = "https://api.foreverdb.app";
 
 /// The products the client works with: Forever runs in the "_classic_beta_" folder,
 /// Classic Era and Hardcore share the "_classic_era_" folder (the season tells them
@@ -151,6 +153,10 @@ struct Settings {
     /// upload (`X-ForeverDB-User`) so the server can block a user and delete their data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user_id: Option<String>,
+    /// The ForeverDB account the user ID was last linked to with a pairing code, for display
+    /// only: the link itself lives on the server and can be removed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linked_account: Option<String>,
 }
 
 /// A fresh install gets the same values as a settings.json that lacks the fields.
@@ -207,6 +213,7 @@ struct SettingsView {
     extra_clients: Vec<String>,
     extra_installations: Vec<String>,
     repository: String,
+    linked_account: Option<String>,
 }
 
 impl Settings {
@@ -218,6 +225,7 @@ impl Settings {
             extra_clients: self.extra_clients.clone(),
             extra_installations: self.extra_installations.clone(),
             repository: addon::repository(),
+            linked_account: self.linked_account.clone(),
         }
     }
 }
@@ -404,6 +412,13 @@ fn target_url() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_TARGET_URL.to_string())
+}
+
+fn api_url() -> String {
+    std::env::var("FOREVERDB_API_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
 /// The ingress exposes every import next to the upload endpoint: the upload goes to
@@ -1429,6 +1444,61 @@ fn set_close_to_tray(
         .view(&app)
 }
 
+/// What the user reads when the API refuses a pairing code.
+fn link_rejection(status: reqwest::StatusCode) -> String {
+    match status.as_u16() {
+        400 | 404 => "The code is wrong, used or expired. Create a new one in your profile.",
+        403 => "This uploader is blocked.",
+        409 => {
+            "This uploader is linked to another account. Unlink it in that account's profile first."
+        }
+        503 => "Accounts are not available on the server right now.",
+        _ => return format!("The server could not link the uploader ({status})."),
+    }
+    .to_string()
+}
+
+/// Redeems a pairing code from the profile page, which links the user ID to that account.
+#[tauri::command]
+async fn link_account(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    code: String,
+) -> Result<SettingsView, String> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err("Enter the code from your profile on foreverdb.app.".to_string());
+    }
+    let http = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(POLL_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| format!("Could not create the HTTP client: {e}"))?;
+    let response = http
+        .post(format!(
+            "{}/v1/uploader/link",
+            api_url().trim_end_matches('/')
+        ))
+        .header("X-ForeverDB-Client", CLIENT_TAG)
+        .json(&serde_json::json!({ "uploaderId": state.user_id(), "code": code }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach ForeverDB: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(link_rejection(status));
+    }
+    let account = response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|json| json.get("account")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "your account".to_string());
+    Ok(state
+        .update(|settings| settings.linked_account = Some(account))
+        .view(&app))
+}
+
 /// Adds or removes the system's autostart entry (Linux: ~/.config/autostart, Windows:
 /// the Run key); it starts the app with --minimized.
 #[tauri::command]
@@ -1992,6 +2062,7 @@ pub fn run() {
             set_auto_upload,
             set_close_to_tray,
             set_autostart,
+            link_account,
             check_addon_update,
             install_addon
         ])
