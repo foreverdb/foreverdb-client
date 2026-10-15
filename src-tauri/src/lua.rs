@@ -23,19 +23,44 @@ const MIN_SCHEMA_VERSION: f64 = 9.0;
 /// Above this limit an `f64` no longer represents integers exactly.
 const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 
-pub fn parse_forever_collect(source: &[u8]) -> Result<Value, String> {
+/// One top-level `Name = value` statement of a SavedVariables file. WoW writes one per
+/// global the addon declares; `span` covers the statement's text without the whitespace
+/// around it.
+struct Assignment {
+    name: String,
+    value: LuaValue,
+    span: std::ops::Range<usize>,
+}
+
+fn parse_assignments(source: &[u8]) -> Result<Vec<Assignment>, String> {
     let mut parser = Parser::new(source)?;
-    match &parser.current {
-        Token::Ident(name) if name == "ForeverCollectDB" => {}
-        _ => return Err(parser.error("expected the ForeverCollectDB assignment")),
+    let mut assignments = Vec::new();
+    while parser.current != Token::Eof {
+        let Token::Ident(name) = parser.current.clone() else {
+            return Err(parser.error("expected a global assignment"));
+        };
+        let start = parser.pos;
+        parser.advance()?;
+        parser.expect(&Token::Equals)?;
+        parser.advance()?;
+        let value = parser.parse_value()?;
+        assignments.push(Assignment {
+            name,
+            value,
+            span: start..parser.previous_end,
+        });
     }
-    parser.advance()?;
-    parser.expect(&Token::Equals)?;
-    parser.advance()?;
-    let value = parser.parse_value()?;
-    if parser.current != Token::Eof {
-        return Err(parser.error("unexpected content after the assignment"));
-    }
+    Ok(assignments)
+}
+
+/// The uploaded snapshot is `ForeverCollectDB` alone; other globals in the file
+/// (`ForeverCollectSettings`) are local to the player and never leave the computer.
+pub fn parse_forever_collect(source: &[u8]) -> Result<Value, String> {
+    let value = parse_assignments(source)?
+        .into_iter()
+        .find(|assignment| assignment.name == "ForeverCollectDB")
+        .ok_or("expected the ForeverCollectDB assignment")?
+        .value;
 
     let root = match normalize(value)? {
         Value::Object(map) => map,
@@ -43,6 +68,20 @@ pub fn parse_forever_collect(source: &[u8]) -> Result<Value, String> {
     };
     validate(&root)?;
     Ok(Value::Object(root))
+}
+
+/// The file without its `ForeverCollectDB` assignment: every other global is kept as
+/// written, so clearing uploaded data never touches the addon settings. Empty when
+/// nothing else is left.
+pub fn without_forever_collect(source: &[u8]) -> Result<Vec<u8>, String> {
+    let mut rest = Vec::new();
+    for assignment in parse_assignments(source)? {
+        if assignment.name != "ForeverCollectDB" {
+            rest.extend_from_slice(&source[assignment.span]);
+            rest.push(b'\n');
+        }
+    }
+    Ok(rest)
 }
 
 fn validate(root: &Map<String, Value>) -> Result<(), String> {
@@ -220,6 +259,8 @@ struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token,
     pos: usize,
+    /// End of the token before `current`, i.e. of the value just parsed.
+    previous_end: usize,
     depth: usize,
 }
 
@@ -229,6 +270,7 @@ impl<'a> Parser<'a> {
             lexer: Lexer { source, pos: 0 },
             current: Token::Eof,
             pos: 0,
+            previous_end: 0,
             depth: 0,
         };
         parser.advance()?;
@@ -236,6 +278,7 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) -> Result<(), String> {
+        self.previous_end = self.lexer.pos;
         let (token, pos) = self.lexer.next()?;
         self.current = token;
         self.pos = pos;
@@ -599,7 +642,40 @@ mod tests {
     #[test]
     fn rejects_content_after_the_assignment() {
         let error = parse("ForeverCollectDB = { }\nprint(1)").unwrap_err();
-        assert!(error.contains("unexpected content"), "{error}");
+        assert!(error.contains("unsupported character"), "{error}");
+        let error = parse("ForeverCollectDB = { }\n7").unwrap_err();
+        assert!(error.contains("global assignment"), "{error}");
+    }
+
+    const SETTINGS: &str =
+        "ForeverCollectSettings = {\n[\"armory\"] = true,\n[\"verbose\"] = false,\n}";
+
+    #[test]
+    fn uploads_only_the_data_global() {
+        let data = valid("[\"k\"] = {},");
+        for source in [
+            format!("\n{data}\n{SETTINGS}\n"),
+            format!("\n{SETTINGS}\n{data}\n"),
+        ] {
+            let value = parse(&source).unwrap();
+            assert!(value.get("armory").is_none() && value.get("settings").is_none());
+            assert_eq!(value["schemaVersion"], 9);
+        }
+        let error = parse(&format!("\n{SETTINGS}\n")).unwrap_err();
+        assert!(error.contains("ForeverCollectDB"), "{error}");
+    }
+
+    #[test]
+    fn removing_the_data_keeps_the_settings_verbatim() {
+        let data = valid("[\"k\"] = {},");
+        let source = format!("\n{data}\n{SETTINGS}\nOtherGlobal = nil\n");
+        let rest = without_forever_collect(source.as_bytes()).unwrap();
+        assert_eq!(
+            String::from_utf8(rest).unwrap(),
+            format!("{SETTINGS}\nOtherGlobal = nil\n")
+        );
+        assert!(without_forever_collect(data.as_bytes()).unwrap().is_empty());
+        assert!(without_forever_collect(b"garbage").is_err());
     }
 
     /// The worker unmarshals these fields into Go `int`; `143.0` would make it fail hard.

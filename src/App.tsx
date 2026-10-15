@@ -466,7 +466,7 @@ function App() {
                   <strong>{importTitle(importFor(result))}</strong>
                   <span>{result.import_id ? `Import ID: ${result.import_id}` : "The server accepted the upload."}</span>
                   {importFor(result)?.status === "failed" && <span>{importFor(result)?.error ?? "The server gave no reason."}</span>}
-                  <small>{result.deleted ? "The file was removed; the next session starts empty." : "WoW is still running: the file stays and is checked again on the next write."}</small>
+                  <small>{result.deleted ? "The uploaded data was cleared; the next session starts empty and the addon settings stay." : "WoW is still running: the file stays and is checked again on the next write."}</small>
                 </div>
               )}
             </section>

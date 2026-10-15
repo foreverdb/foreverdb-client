@@ -3222,6 +3222,7 @@ ForeverCollectDB = {
 },
 },
 ["schemaVersion"] = 9,
-["settings"] = {
-},
+}
+ForeverCollectSettings = {
+["verbose"] = false,
 }

@@ -1339,19 +1339,43 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
 }
 
 /// Removes an uploaded snapshot. WoW rewrites the SavedVariables on logout, so the current
-/// file is only removed once the game is closed; an uploaded .bak is never read by the game
-/// again. Returns whether the current file is gone.
+/// file is only cleared once the game is closed; an uploaded .bak is never read by the game
+/// again. Returns whether the uploaded data is gone from the current file.
 fn delete_uploaded_snapshot(source: &SnapshotSource, main_path: &Path, running: bool) -> bool {
     if source.from_backup {
         let _ = fs::remove_file(&source.path);
-        !running && !file_has_catalogs(main_path) && fs::remove_file(main_path).is_ok()
+        !running && !file_has_catalogs(main_path) && strip_uploaded_data(main_path)
     } else {
-        let removed = !running && fs::remove_file(&source.path).is_ok();
+        let removed = !running && strip_uploaded_data(&source.path);
         if removed {
             let _ = fs::remove_file(backup_path(&source.path));
         }
         removed
     }
+}
+
+/// Clears the collected data but keeps the addon settings: only the `ForeverCollectDB`
+/// global goes, every other one (`ForeverCollectSettings`) stays as written. A file with
+/// nothing else in it is removed; one that does not parse is left alone.
+fn strip_uploaded_data(path: &Path) -> bool {
+    let Ok(rest) = fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|source| lua::without_forever_collect(&source))
+    else {
+        return false;
+    };
+    if rest.is_empty() {
+        return fs::remove_file(path).is_ok();
+    }
+    let temp = PathBuf::from(format!("{}.tmp", path.display()));
+    if fs::write(&temp, &rest)
+        .and_then(|()| fs::rename(&temp, path))
+        .is_err()
+    {
+        let _ = fs::remove_file(&temp);
+        return false;
+    }
+    true
 }
 
 const ARCHIVE_LIMIT: usize = 30;
@@ -1850,7 +1874,7 @@ async fn watch_and_upload(app: AppHandle) {
                             &client.id,
                             "cleaned",
                             format!(
-                                "{}: uploaded data deleted after the game closed.",
+                                "{}: uploaded data cleared after the game closed; settings kept.",
                                 client.label
                             ),
                             None,
@@ -2385,7 +2409,7 @@ mod tests {
 
     #[test]
     fn detects_empty_snapshots() {
-        let empty = b"\nForeverCollectDB = {\n[\"catalogs\"] = {\n},\n[\"schemaVersion\"] = 9,\n[\"settings\"] = {\n},\n}\n";
+        let empty = b"\nForeverCollectDB = {\n[\"catalogs\"] = {\n},\n[\"schemaVersion\"] = 9,\n}\nForeverCollectSettings = {\n[\"verbose\"] = false,\n}\n";
         assert!(!snapshot_has_catalogs(empty));
         let filled = b"ForeverCollectDB = {\n[\"catalogs\"] = {\n[\"1:16001:0:enUS:9:7:Alliance\"] = {\n[\"scannedAt\"] = 1,\n},\n},\n}\n";
         assert!(snapshot_has_catalogs(filled));
@@ -2407,8 +2431,12 @@ mod tests {
         let dir = temp_dir("delete-snapshot");
         let main = dir.join("ForeverCollect.lua");
         let backup = backup_path(&main);
+        let settings = "ForeverCollectSettings = {\n[\"armory\"] = true,\n}";
+        let uploaded = format!(
+            "\nForeverCollectDB = {{\n[\"catalogs\"] = {{\n[\"k\"] = {{}},\n}},\n}}\n{settings}\n"
+        );
 
-        fs::write(&main, "x").unwrap();
+        fs::write(&main, &uploaded).unwrap();
         fs::write(&backup, "x").unwrap();
         let current = SnapshotSource {
             path: main.clone(),
@@ -2420,7 +2448,18 @@ mod tests {
         );
         assert!(main.exists() && backup.exists());
         assert!(delete_uploaded_snapshot(&current, &main, false));
-        assert!(!main.exists() && !backup.exists());
+        assert_eq!(fs::read_to_string(&main).unwrap(), format!("{settings}\n"));
+        assert!(!backup.exists());
+
+        // without other globals the file goes entirely
+        fs::write(&main, "ForeverCollectDB = {\n}\n").unwrap();
+        assert!(delete_uploaded_snapshot(&current, &main, false));
+        assert!(!main.exists());
+
+        // an unparsable file is left alone
+        fs::write(&main, "x").unwrap();
+        assert!(!delete_uploaded_snapshot(&current, &main, false));
+        assert!(main.exists());
 
         // an uploaded .bak goes; a current file with new catalogs stays for its own upload
         fs::write(
@@ -2435,6 +2474,17 @@ mod tests {
         };
         assert!(!delete_uploaded_snapshot(&from_backup, &main, false));
         assert!(main.exists() && !backup.exists());
+
+        // an emptied database next to the uploaded .bak loses only its data global
+        fs::write(
+            &main,
+            format!("ForeverCollectDB = {{\n[\"catalogs\"] = {{\n}},\n}}\n{settings}\n"),
+        )
+        .unwrap();
+        fs::write(&backup, &uploaded).unwrap();
+        assert!(delete_uploaded_snapshot(&from_backup, &main, false));
+        assert_eq!(fs::read_to_string(&main).unwrap(), format!("{settings}\n"));
+        assert!(!backup.exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -37,7 +37,7 @@ WoW writes the SavedVariables only on logout, on `/reload` and on exit. The app 
 
 **Backup file:** If the current file is an emptied database (its state after an upload) but the game's `ForeverCollect.lua.bak` still holds a session, the `.bak` is uploaded instead.
 
-**Cleanup:** After a successful upload the file is removed once the game is closed; an uploaded `.bak` is removed right away. This way the next session starts empty.
+**Cleanup:** After a successful upload the collected data (`ForeverCollectDB`) is cleared from the file once the game is closed; the addon settings (`ForeverCollectSettings`) stay as written, and a file with nothing else in it is removed. An uploaded `.bak` is removed right away. This way the next session starts empty without resetting `/fc` settings.
 
 **Archive:** Every upload keeps a copy (the last 30):
 - Linux: `~/.local/share/gg.foreverdb.client/archive/`
@@ -49,7 +49,7 @@ WoW writes the SavedVariables only on logout, on `/reload` and on exit. The app 
 
 **From 0.1 (ForeverDB Client):** Up to 0.1 the app used the identifier `com.alex.foreverdb-client`. If the new directory has no `settings.json` yet, the first start copies it from the old directory (same user ID, hashes and added clients) and moves the old archive over. The old directories stay and can be deleted by hand.
 
-**Warnings:** The app warns when the game has run for more than 2 h without writing the file. In the game, `/fc save` or `/fc autosave 30` fixes that. It also warns when the client's `Errors/` folder holds a crash report newer than the last save; the data of that session was then never written.
+**Warnings:** The app warns when the game has run for more than 2 h without writing the file. In the game, `/fc save` fixes that. It also warns when the client's `Errors/` folder holds a crash report newer than the last save; the data of that session was then never written.
 
 ## Tray and autostart
 
