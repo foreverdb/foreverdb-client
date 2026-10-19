@@ -5,23 +5,37 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
+/** A WoW account folder of a client; uploaded on its own. */
+type AccountStatus = {
+  key: string;
+  name: string;
+  /** The person behind the account; Battle.net licences "<id>#1", "<id>#2" share it. */
+  bnet_id: string;
+  characters: string[];
+  file_path: string;
+  file_exists: boolean;
+  file_has_data: boolean;
+  from_backup: boolean;
+  saved_at: number | null;
+  linked_account: string | null;
+};
+
 type ClientStatus = {
   id: string;
   label: string;
   product: string;
   version: string | null;
-  file_path: string | null;
-  file_exists: boolean;
-  file_has_data: boolean;
-  from_backup: boolean;
+  accounts: AccountStatus[];
   running: boolean;
   custom: boolean;
   addon_version: string | null;
   addon_update: string | null;
-  saved_at: number | null;
   running_since: number | null;
   crash_at: number | null;
 };
+
+/** One person sharing the installation: the accounts of one Battle.net account. */
+type User = { bnet_id: string; accounts: AccountStatus[]; linked_account: string | null };
 
 const UNSAVED_WARNING_HOURS = 2;
 // English texts with a 24-hour clock and day-first dates.
@@ -31,21 +45,45 @@ function clock(unixSeconds: number) {
   return new Date(unixSeconds * 1000).toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" });
 }
 
+/** Last time the game wrote the SavedVariables of any of the client's accounts. */
+function savedAt(client: ClientStatus) {
+  const times = client.accounts.flatMap((account) => (account.saved_at === null ? [] : [account.saved_at]));
+  return times.length > 0 ? Math.max(...times) : null;
+}
+
 /** Hours the running game has gone without writing its SavedVariables. */
 function unsavedHours(client: ClientStatus) {
   if (client.running_since === null) return 0;
-  const since = Math.max(client.running_since, client.saved_at ?? 0);
+  const since = Math.max(client.running_since, savedAt(client) ?? 0);
   return (Date.now() / 1000 - since) / 3600;
+}
+
+function usersOf(clients: ClientStatus[]): User[] {
+  const users = new Map<string, User>();
+  for (const account of clients.flatMap((client) => client.accounts)) {
+    const user = users.get(account.bnet_id) ?? { bnet_id: account.bnet_id, accounts: [], linked_account: null };
+    user.accounts.push(account);
+    user.linked_account ??= account.linked_account;
+    users.set(account.bnet_id, user);
+  }
+  return [...users.values()];
+}
+
+function accountHint(accounts: AccountStatus[]) {
+  const characters = [...new Set(accounts.flatMap((account) => account.characters))];
+  return characters.length > 0 ? characters.slice(0, 4).join(", ") : accounts.map((account) => account.name).join(", ");
 }
 type AddonRelease = { version: string; name: string; notes: string; published_at: string; html_url: string; asset_name: string; asset_size: number };
 type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
 type UploadResult = { import_id: string | null; file_path: string; running: boolean; deleted: boolean };
-type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; repository: string; linked_account: string | null };
+type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; repository: string };
 type ImportStatus = { import_id: string; status: "queued" | "processing" | "completed" | "failed"; error: string | null };
 type Activity = {
   client: string;
+  /** Key of the account folder the event is about. */
+  account: string | null;
   kind: "pending" | "uploaded" | "cleaned" | "processing" | "completed" | "failed" | "error" | "update";
   message: string;
   result: UploadResult | null;
@@ -78,6 +116,11 @@ function App() {
   // Read by the activity listener, which is not re-subscribed when the selection changes.
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  // The account whose upload result or error is shown.
+  const [uploadAccount, setUploadAccount] = useState<string | null>(null);
+  // Read by the activity listener, like selectedRef.
+  const uploadAccountRef = useRef(uploadAccount);
+  uploadAccountRef.current = uploadAccount;
   const [result, setResult] = useState<UploadResult | null>(null);
   // Server-side progress of the import behind `result`, reported by the Rust poller.
   const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
@@ -85,17 +128,22 @@ function App() {
   const [error, setError] = useState("");
   const [uploadError, setUploadError] = useState("");
   const [addonError, setAddonError] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Key of the account being uploaded by hand.
+  const [busy, setBusy] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [dialog, setDialog] = useState<{ candidates: ClientCandidate[]; error: string } | null>(null);
   const [release, setRelease] = useState<AddonRelease | null>(null);
   const [releaseError, setReleaseError] = useState("");
+  // Outcome of the last check by hand, so a check that finds nothing does not look like no check at all.
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState("");
   const [installing, setInstalling] = useState(false);
   const [installed, setInstalled] = useState<InstallResult | null>(null);
-  const [pairingCode, setPairingCode] = useState("");
-  const [linking, setLinking] = useState(false);
-  const [linkError, setLinkError] = useState("");
+  // Pairing codes, the user being linked and link errors, per user (bnet_id).
+  const [pairingCodes, setPairingCodes] = useState<Record<string, string>>({});
+  const [linking, setLinking] = useState<string | null>(null);
+  const [linkErrors, setLinkErrors] = useState<Record<string, string>>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -105,8 +153,10 @@ function App() {
         if (current && found.clients.some((client) => client.id === current)) return current;
         return found.clients[0]?.id ?? null;
       });
+      return found;
     } catch (message) {
       setError(String(message));
+      return null;
     }
   }, []);
 
@@ -122,15 +172,32 @@ function App() {
   }, []);
 
   const checkRelease = useCallback(async (force: boolean) => {
+    let latest: AddonRelease | null = null;
     try {
-      setRelease(await invoke<AddonRelease>("check_addon_update", { force }));
+      latest = await invoke<AddonRelease>("check_addon_update", { force });
+      setRelease(latest);
       setReleaseError("");
     } catch (message) {
       setRelease(null);
       setReleaseError(String(message));
     }
-    await refresh();
+    return { latest, found: await refresh() };
   }, [refresh]);
+
+  async function checkByHand() {
+    setChecking(true);
+    setCheckResult("");
+    try {
+      const { latest, found } = await checkRelease(true);
+      const checked = found?.clients.find((entry) => entry.id === selectedRef.current);
+      // An available update or a missing addon already shows itself with its button.
+      if (latest && checked?.addon_version && !checked.addon_update) {
+        setCheckResult(`No update found – v${checked.addon_version} is up to date (latest release: v${latest.version}).`);
+      }
+    } finally {
+      setChecking(false);
+    }
+  }
 
   useEffect(() => {
     void checkRelease(false);
@@ -160,13 +227,15 @@ function App() {
       const entry: LogEntry = { ...event.payload, at: timestamp(), id: logSequence };
       // newest first, ordered by sequence no matter in which order events are delivered
       setLog((entries) => [entry, ...entries].sort((a, b) => b.id - a.id).slice(0, LOG_LIMIT));
-      if (event.payload.result) {
+      if (event.payload.result && event.payload.client === selectedRef.current) {
+        setUploadAccount(event.payload.account);
+        setUploadError("");
         setResult(event.payload.result);
         setImportStatus(null);
       }
       if (event.payload.import) setImportStatus(event.payload.import);
       // The watcher removes an uploaded file once the game has closed, after the upload result came in.
-      if (event.payload.kind === "cleaned" && event.payload.client === selectedRef.current) {
+      if (event.payload.kind === "cleaned" && event.payload.account === uploadAccountRef.current) {
         setResult((current) => current && { ...current, running: false, deleted: true });
       }
       if (event.payload.kind === "update") void checkRelease(false);
@@ -221,17 +290,18 @@ function App() {
     }
   }
 
-  async function linkAccount(event: FormEvent) {
+  async function linkAccount(event: FormEvent, user: string) {
     event.preventDefault();
-    setLinking(true);
-    setLinkError("");
+    setLinking(user);
+    setLinkErrors((errors) => ({ ...errors, [user]: "" }));
     try {
-      setSettings(await invoke<Settings>("link_account", { code: pairingCode }));
-      setPairingCode("");
+      await invoke<string>("link_account", { code: pairingCodes[user] ?? "", user });
+      setPairingCodes((codes) => ({ ...codes, [user]: "" }));
+      await refresh();
     } catch (message) {
-      setLinkError(String(message));
+      setLinkErrors((errors) => ({ ...errors, [user]: String(message) }));
     } finally {
-      setLinking(false);
+      setLinking(null);
     }
   }
 
@@ -242,32 +312,36 @@ function App() {
     return importStatus && importStatus.import_id === upload.import_id ? importStatus : null;
   }
 
-  async function upload() {
-    if (!client?.file_has_data) return;
-    setBusy(true);
+  async function upload(account: AccountStatus) {
+    if (!client || !account.file_has_data) return;
+    setBusy(account.key);
+    setUploadAccount(account.key);
     setUploadError("");
     setResult(null);
     setImportStatus(null);
     try {
-      setResult(await invoke<UploadResult>("upload", { client: client.id }));
+      setResult(await invoke<UploadResult>("upload", { client: client.id, account: account.key }));
       await refresh();
     } catch (message) {
       setUploadError(String(message));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
   function selectClient(id: string) {
     setSelected(id);
+    setUploadAccount(null);
     setResult(null);
     setImportStatus(null);
     setUploadError("");
     setAddonError("");
     setInstalled(null);
+    setCheckResult("");
   }
 
   const clients = installation?.clients ?? [];
+  const users = usersOf(clients);
   const addonState = client?.addon_update ? "update" : client?.addon_version ? "ok" : "missing";
 
   return (
@@ -302,28 +376,38 @@ function App() {
           <span className="track" />
           <span>Closing the window keeps the uploader running in the tray</span>
         </label>
-        <form className="account" onSubmit={(event) => void linkAccount(event)}>
-          <span>
-            {settings?.linked_account
-              ? <>Linked to <strong>{settings.linked_account}</strong></>
-              : "Link this uploader to your ForeverDB account to see your characters in your profile."}
-          </span>
-          <div className="account-row">
-            <input
-              value={pairingCode}
-              onChange={(event) => setPairingCode(event.target.value)}
-              placeholder="Pairing code from your profile"
-              aria-label="Pairing code"
-              autoComplete="off"
-              spellCheck={false}
-              disabled={linking}
-            />
-            <button className="secondary" type="submit" disabled={linking || pairingCode.trim() === ""}>
-              {linking ? "Linking …" : "Link"}
-            </button>
-          </div>
-          {linkError && <small className="account-error">{linkError}</small>}
-        </form>
+        {users.length === 0 && (
+          <p className="account muted">
+            Linking to your ForeverDB account becomes possible once WoW has created your account folder (after your first login).
+          </p>
+        )}
+        {users.map((user) => (
+          <form key={user.bnet_id} className="account" onSubmit={(event) => void linkAccount(event, user.bnet_id)}>
+            <span>
+              {users.length > 1 && <><strong>{accountHint(user.accounts)}</strong> · </>}
+              {user.linked_account
+                ? <>Linked to <strong>{user.linked_account}</strong></>
+                : users.length > 1
+                  ? "Link these characters to your ForeverDB account to see them in your profile."
+                  : "Link this uploader to your ForeverDB account to see your characters in your profile."}
+            </span>
+            <div className="account-row">
+              <input
+                value={pairingCodes[user.bnet_id] ?? ""}
+                onChange={(event) => setPairingCodes((codes) => ({ ...codes, [user.bnet_id]: event.target.value }))}
+                placeholder="Pairing code from your profile"
+                aria-label={`Pairing code for ${user.accounts.map((account) => account.name).join(", ")}`}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={linking !== null}
+              />
+              <button className="secondary" type="submit" disabled={linking !== null || (pairingCodes[user.bnet_id] ?? "").trim() === ""}>
+                {linking === user.bnet_id ? "Linking …" : "Link"}
+              </button>
+            </div>
+            {linkErrors[user.bnet_id] && <small className="account-error">{linkErrors[user.bnet_id]}</small>}
+          </form>
+        ))}
       </section>
 
       {installation === null && <div className="card"><p className="muted">Looking for World of Warcraft ...</p></div>}
@@ -391,7 +475,9 @@ function App() {
                   <h2>ForeverCollect addon</h2>
                   <p>The addon collects the data in the game. Keep it up to date so the server accepts your uploads.</p>
                 </div>
-                <button className="link" onClick={() => void checkRelease(true)}>Check for updates</button>
+                <button className="link" onClick={() => void checkByHand()} disabled={checking}>
+                  {checking ? "Checking …" : "Check for updates"}
+                </button>
               </div>
               <div className={`addon-status ${addonState}`}>
                 <div>
@@ -412,6 +498,7 @@ function App() {
                     )}
                     {!release && releaseError && <span className="warning">{releaseError}</span>}
                   </small>
+                  {checkResult && !client.addon_update && <small>{checkResult}</small>}
                   {installed && installed.running && <small className="warning">Installed – takes effect after your next login or /reload.</small>}
                 </div>
                 {(client.addon_update || (!client.addon_version && release)) && (
@@ -433,42 +520,57 @@ function App() {
                   <p>{settings?.auto_upload ? "New data is uploaded automatically; you can also upload by hand." : "Automatic upload is off; upload by hand."}</p>
                 </div>
               </div>
-              <div className={`file-status ${client.file_has_data ? "ok" : "missing"}`}>
-                <span className="status-dot" />
-                <div>
-                  <strong>
-                    {client.file_has_data
-                      ? (client.from_backup ? "Backup with data ready" : "File ready")
-                      : client.file_exists ? "No new data since the last upload" : "No data yet"}
-                  </strong>
-                  <small>{client.file_path ?? "No account folder found"}</small>
-                  {client.running && <small className="warning">WoW is running – new data arrives when you log out or type /reload.</small>}
-                  {client.running && unsavedHours(client) >= UNSAVED_WARNING_HOURS && (
-                    <small className="alert">
-                      Nothing saved for {Math.floor(unsavedHours(client))} h – a crash would lose everything since the last save. Type <code>/fc save</code> in the game.
-                    </small>
-                  )}
-                  {client.crash_at !== null && (
-                    <small className="alert">
-                      WoW crashed at {clock(client.crash_at)}{client.saved_at !== null ? `, last saved at ${clock(client.saved_at)}` : ""} – the data of that session was not written.
-                    </small>
-                  )}
-                </div>
-              </div>
-
-              <button className="primary" onClick={upload} disabled={busy || !client.file_has_data}>
-                {busy ? "Uploading ..." : "Upload now"}<span>→</span>
-              </button>
-
-              {uploadError && <div className="notice error"><strong>Upload not possible</strong><span>{uploadError}</span></div>}
-              {result && (
-                <div className={`notice ${importFor(result)?.status === "failed" ? "error" : "success"}`}>
-                  <strong>{importTitle(importFor(result))}</strong>
-                  <span>{result.import_id ? `Import ID: ${result.import_id}` : "The server accepted the upload."}</span>
-                  {importFor(result)?.status === "failed" && <span>{importFor(result)?.error ?? "The server gave no reason."}</span>}
-                  <small>{result.deleted ? "The uploaded data was cleared; the next session starts empty and the addon settings stay." : "WoW is still running: the file stays and is checked again on the next write."}</small>
+              {client.accounts.length === 0 && (
+                <div className="file-status missing">
+                  <span className="status-dot" />
+                  <div>
+                    <strong>No data yet</strong>
+                    <small>No account folder found – log in to WoW once.</small>
+                  </div>
                 </div>
               )}
+              {client.running && <p className="warning small-note">WoW is running – new data arrives when you log out or type /reload.</p>}
+              {client.running && unsavedHours(client) >= UNSAVED_WARNING_HOURS && (
+                <p className="alert small-note">
+                  Nothing saved for {Math.floor(unsavedHours(client))} h – a crash would lose everything since the last save. Type <code>/fc save</code> in the game.
+                </p>
+              )}
+              {client.crash_at !== null && (
+                <p className="alert small-note">
+                  WoW crashed at {clock(client.crash_at)}{savedAt(client) !== null ? `, last saved at ${clock(savedAt(client)!)}` : ""} – the data of that session was not written.
+                </p>
+              )}
+              {client.accounts.map((account) => (
+                <div key={account.key} className="account-upload">
+                  <div className={`file-status ${account.file_has_data ? "ok" : "missing"}`}>
+                    <span className="status-dot" />
+                    <div>
+                      <strong>
+                        {client.accounts.length > 1 && `${account.name}: `}
+                        {account.file_has_data
+                          ? (account.from_backup ? "Backup with data ready" : "File ready")
+                          : account.file_exists ? "No new data since the last upload" : "No data yet"}
+                      </strong>
+                      {client.accounts.length > 1 && account.characters.length > 0 && <small>{account.characters.join(", ")}</small>}
+                      <small>{account.file_path}</small>
+                    </div>
+                  </div>
+
+                  <button className="primary" onClick={() => void upload(account)} disabled={busy !== null || !account.file_has_data}>
+                    {busy === account.key ? "Uploading ..." : client.accounts.length > 1 ? `Upload ${account.name} now` : "Upload now"}<span>→</span>
+                  </button>
+
+                  {uploadAccount === account.key && uploadError && <div className="notice error"><strong>Upload not possible</strong><span>{uploadError}</span></div>}
+                  {uploadAccount === account.key && result && (
+                    <div className={`notice ${importFor(result)?.status === "failed" ? "error" : "success"}`}>
+                      <strong>{importTitle(importFor(result))}</strong>
+                      <span>{result.import_id ? `Import ID: ${result.import_id}` : "The server accepted the upload."}</span>
+                      {importFor(result)?.status === "failed" && <span>{importFor(result)?.error ?? "The server gave no reason."}</span>}
+                      <small>{result.deleted ? "The uploaded data was cleared; the next session starts empty and the addon settings stay." : "WoW is still running: the file stays and is checked again on the next write."}</small>
+                    </div>
+                  )}
+                </div>
+              ))}
             </section>
           )}
         </>

@@ -128,6 +128,10 @@ button.client-tab:hover { box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--
 .addon-status .secondary { margin: 0; flex-shrink: 0; }
 .warning { color: var(--brand-gold); }
 .file-status .alert { display: block; margin-top: 4px; color: var(--destructive); }
+.alert { color: var(--destructive); }
+p.warning, p.alert { font-size: 13px; }
+.account-upload + .account-upload { margin-top: 28px; padding-top: 10px; border-top: 1px solid var(--hairline); }
+.account-upload .primary { margin-top: 14px; }
 
 .notice { display: flex; flex-direction: column; gap: 5px; margin-top: 14px; padding: 16px; border-radius: calc(var(--radius) * 1.4); font-size: 14px; background: color-mix(in oklch, var(--brand-azure) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--brand-azure) 35%, transparent); }
 .notice span, .notice small { color: var(--muted-foreground); }

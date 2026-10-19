@@ -20,7 +20,7 @@ The window follows the order in which things have to happen:
 
    Your choice is stored in `settings.json`.
 2. **ForeverCollect addon.** Shows the installed addon version next to the latest release and installs or updates it with one click (see "Addon updates").
-3. **Upload.** Shows the state of `ForeverCollect.lua` and warns about the situations below, then offers "Upload now" for a manual upload next to the automatic one:
+3. **Upload.** Shows the state of `ForeverCollect.lua` for every WoW account of the client (`WTF/Account/<account>`, several when several people or licences play on one installation) and warns about the situations below, then offers "Upload now" per account for a manual upload next to the automatic one:
    - WoW is running.
    - The game has not saved for a long time.
    - The game crashed.
@@ -33,13 +33,13 @@ Environment overrides: `FOREVERDB_WOW_DIR`, `FOREVERDB_INGRESS_URL`, `FOREVERDB_
 
 ## Automatic upload
 
-WoW writes the SavedVariables only on logout, on `/reload` and on exit. The app checks the `ForeverCollect.lua` of every active client every 3 s. It uploads a new write once the file has been unchanged for 3 s and its content differs from the last upload (the hash is kept in `settings.json`). This happens whether or not the game is still running.
+WoW writes the SavedVariables only on logout, on `/reload` and on exit. The app checks the `ForeverCollect.lua` of every account folder of every active client every 3 s; `WTF/Account/SavedVariables` (account-wide variables of all accounts) is no account. It uploads a new write once the file has been unchanged for 3 s and its content differs from the last upload (the hash is kept per account folder in `settings.json`). This happens whether or not the game is still running.
 
 **Backup file:** If the current file is an emptied database (its state after an upload) but the game's `ForeverCollect.lua.bak` still holds a session, the `.bak` is uploaded instead.
 
 **Cleanup:** After a successful upload the collected data (`ForeverCollectDB`) is cleared from the file once the game is closed; the addon settings (`ForeverCollectSettings`) stay as written, and a file with nothing else in it is removed. An uploaded `.bak` is removed right away. This way the next session starts empty without resetting `/fc` settings.
 
-**Archive:** Every upload keeps a copy (the last 30):
+**Archive:** Every upload keeps a copy named after client and account (the last 30):
 - Linux: `~/.local/share/gg.foreverdb.client/archive/`
 - Windows: `%APPDATA%\gg.foreverdb.client\archive\`
 
@@ -86,11 +86,13 @@ The addon repository is public, so the check and the download need no GitHub tok
 
 ## User ID
 
-On its first start the uploader creates a random ID (UUID v4) and stores it as `user_id` in `settings.json`. Later starts keep it. Every upload carries it in the `X-ForeverDB-User` header, and the server records it as the uploader of the import and of the observations it contributed first.
+The uploader creates a random ID (UUID v4) per user and stores it under `identities` in `settings.json`; later starts keep it. A user is a Battle.net account: the account folders `<id>#1`, `<id>#2` are licences of the same Battle.net account and share one ID, a folder without `#` (old account name) gets its own. So people sharing one installation upload as different uploaders, and each of them links their characters to their own ForeverDB account with a pairing code in the window.
+
+**From 0.3:** Up to 0.3 there was a single `user_id` (and `linked_account`). The first Battle.net account found takes it over with its link, which is the account the old version uploaded; everyone else gets a new ID. Every upload carries it in the `X-ForeverDB-User` header, and the server records it as the uploader of the import and of the observations it contributed first.
 
 **What this allows:** An admin can block an uploader, after which the ingress answers `403` and the uploader shows the rejection without retrying the same file. An admin can also delete everything that uploader contributed.
 
-**Limits:** The ID is created by the uploader itself, so it identifies an installation, not a person. Deleting `settings.json` produces a new one. Uploads without the header are rejected with `400`, so uploaders older than this version can no longer upload.
+**Limits:** The ID is created by the uploader itself, so it identifies an installation's user, not a person. Deleting `settings.json` produces a new one. Uploads without the header are rejected with `400`, so uploaders older than this version can no longer upload.
 
 ## Linux
 

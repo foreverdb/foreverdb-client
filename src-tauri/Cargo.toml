@@ -1,6 +1,6 @@
 [package]
 name = "foreverdb-uploader"
-version = "0.3.0"
+version = "0.4.0"
 description = "Uploads ForeverCollect SavedVariables from World of Warcraft: Forever and Classic Hardcore to ForeverDB"
 authors = ["Alex Bangert"]
 license = "MIT"
@@ -47,6 +47,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_WindowsProgramming",
 ] }
 
+[profile.dev]
+debug = "line-tables-only"
+incremental = true
+
+[profile.dev.package."*"]
+debug = 0
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

@@ -70,19 +70,39 @@ struct ClientDef {
     process: String,
 }
 
+/// A WoW account folder (`WTF/Account/<name>`) of a client; each one has its own
+/// SavedVariables and is uploaded on its own.
+#[derive(Serialize, Clone, Debug)]
+struct AccountStatus {
+    /// The account folder; identifies the account in the per-upload state.
+    key: String,
+    name: String,
+    /// The user the account belongs to, see `AccountDir::bnet_id`.
+    bnet_id: String,
+    /// "Character-Realm" of the first character folders, so people sharing an
+    /// installation recognise their account.
+    characters: Vec<String>,
+    /// The file that would be uploaded: the SavedVariables file, or the game's .bak
+    /// of it when the current file is an emptied database.
+    file_path: String,
+    file_exists: bool,
+    /// The file holds catalogs; an emptied database is not worth uploading.
+    file_has_data: bool,
+    from_backup: bool,
+    /// Unix time the SavedVariables file was last written (WoW writes it only on logout,
+    /// exit or /reload).
+    saved_at: Option<u64>,
+    /// The ForeverDB account this user's uploader ID was linked to, for display.
+    linked_account: Option<String>,
+}
+
 #[derive(Serialize)]
 struct ClientStatus {
     id: String,
     label: String,
     product: String,
     version: Option<String>,
-    /// The file that would be uploaded: the SavedVariables file, or the game's .bak
-    /// of it when the current file is an emptied database.
-    file_path: Option<String>,
-    file_exists: bool,
-    /// The file holds catalogs; an emptied database is not worth uploading.
-    file_has_data: bool,
-    from_backup: bool,
+    accounts: Vec<AccountStatus>,
     running: bool,
     /// Added by the user (as opposed to detected as installed); can be removed again.
     custom: bool,
@@ -90,9 +110,6 @@ struct ClientStatus {
     addon_version: Option<String>,
     /// Newest release version when it is newer than the installed addon (or none is installed).
     addon_update: Option<String>,
-    /// Unix time the SavedVariables file was last written (WoW writes it only on logout,
-    /// exit or /reload).
-    saved_at: Option<u64>,
     /// Unix time the running game process was started, when it is running.
     running_since: Option<u64>,
     /// Unix time of the newest crash dump in the client's Errors folder that is younger than
@@ -141,18 +158,35 @@ struct Settings {
     /// WoW installation directories the user added; their installed clients are active.
     #[serde(default)]
     extra_installations: Vec<String>,
-    /// Per client, the SHA-256 of the file uploaded last, so a file that could not
+    /// Per account folder, the SHA-256 of the file uploaded last, so a file that could not
     /// be removed (game still running) is not sent twice.
     #[serde(default)]
     last_upload_hash: HashMap<String, String>,
-    /// Per client, the Unix time of the last successful upload. The upload removes the
-    /// SavedVariables file, so this stands in for its timestamp when judging crash dumps.
+    /// Per account folder, the Unix time of the last successful upload. The upload removes
+    /// the SavedVariables file, so this stands in for its timestamp when judging crash dumps.
     #[serde(default)]
     last_upload_at: HashMap<String, u64>,
-    /// Random ID created on the first start and kept from then on. Sent with every
-    /// upload (`X-ForeverDB-User`) so the server can block a user and delete their data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    user_id: Option<String>,
+    /// Per user (Battle.net account, see `AccountDir::bnet_id`) the uploader identity, so
+    /// people sharing one installation upload and link as different uploaders.
+    #[serde(default)]
+    identities: HashMap<String, Identity>,
+    /// The single user ID of versions that knew only one account. The first user found
+    /// takes it over (with its link), so that account keeps its uploader.
+    #[serde(default, rename = "user_id", skip_serializing_if = "Option::is_none")]
+    legacy_user_id: Option<String>,
+    #[serde(
+        default,
+        rename = "linked_account",
+        skip_serializing_if = "Option::is_none"
+    )]
+    legacy_linked_account: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct Identity {
+    /// Random ID sent with every upload of this user (`X-ForeverDB-User`) so the server
+    /// can block a user and delete their data.
+    user_id: String,
     /// The ForeverDB account the user ID was last linked to with a pairing code, for display
     /// only: the link itself lives on the server and can be removed there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,19 +201,33 @@ impl Default for Settings {
 }
 
 /// Settings from the content of settings.json, and whether it was unusable. An unusable file
-/// falls back to the defaults but keeps its user ID when it can still be read, so a damaged
-/// file never gives the uploader a new identity (the server blocks and deletes by that ID).
+/// falls back to the defaults but keeps the user IDs it can still read, so a damaged file
+/// never gives an uploader a new identity (the server blocks and deletes by that ID).
 fn parse_settings(content: &str) -> (Settings, bool) {
     if let Ok(settings) = serde_json::from_str(content) {
         return (settings, false);
     }
-    let user_id = serde_json::from_str::<serde_json::Value>(content)
-        .ok()
+    let value = serde_json::from_str::<serde_json::Value>(content).ok();
+    let legacy_user_id = value
+        .as_ref()
         .and_then(|value| value.get("user_id")?.as_str().map(str::to_string))
         .filter(|id| !id.trim().is_empty());
+    let identities = value
+        .as_ref()
+        .and_then(|value| value.get("identities")?.as_object())
+        .into_iter()
+        .flatten()
+        .filter_map(|(user, identity)| {
+            serde_json::from_value::<Identity>(identity.clone())
+                .ok()
+                .filter(|identity| !identity.user_id.trim().is_empty())
+                .map(|identity| (user.clone(), identity))
+        })
+        .collect();
     (
         Settings {
-            user_id,
+            legacy_user_id,
+            identities,
             ..Settings::default()
         },
         true,
@@ -194,13 +242,48 @@ fn content_hash(content: &[u8]) -> String {
         .collect()
 }
 
-/// Creates the user ID if the settings have none yet; returns whether it did.
-fn ensure_user_id(settings: &mut Settings) -> bool {
-    if settings.user_id.is_some() {
-        return false;
+/// Creates the identities of the given users that the settings lack yet, in the given
+/// order; returns whether it created one. The first new one takes over the legacy user ID.
+fn ensure_identities<'a>(
+    settings: &mut Settings,
+    users: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let mut created = false;
+    for user in users {
+        if settings.identities.contains_key(user) {
+            continue;
+        }
+        let identity = match settings.legacy_user_id.take() {
+            Some(user_id) => Identity {
+                user_id,
+                linked_account: settings.legacy_linked_account.take(),
+            },
+            None => Identity {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                linked_account: None,
+            },
+        };
+        settings.identities.insert(user.to_string(), identity);
+        created = true;
     }
-    settings.user_id = Some(uuid::Uuid::new_v4().to_string());
-    true
+    created
+}
+
+/// The users of the given clients in the order they get their identities: Battle.net
+/// account folders first, as only those were uploaded before there was more than one
+/// identity, and the legacy user ID belongs to the first of them.
+fn users_of(clients: &[ClientStatus]) -> Vec<String> {
+    let accounts = || clients.iter().flat_map(|client| &client.accounts);
+    let mut users: Vec<String> = Vec::new();
+    for account in accounts()
+        .filter(|account| account.name.contains('#'))
+        .chain(accounts().filter(|account| !account.name.contains('#')))
+    {
+        if !users.contains(&account.bnet_id) {
+            users.push(account.bnet_id.clone());
+        }
+    }
+    users
 }
 
 /// What the window may see of the settings.
@@ -213,7 +296,6 @@ struct SettingsView {
     extra_clients: Vec<String>,
     extra_installations: Vec<String>,
     repository: String,
-    linked_account: Option<String>,
 }
 
 impl Settings {
@@ -225,7 +307,6 @@ impl Settings {
             extra_clients: self.extra_clients.clone(),
             extra_installations: self.extra_installations.clone(),
             repository: addon::repository(),
-            linked_account: self.linked_account.clone(),
         }
     }
 }
@@ -253,6 +334,8 @@ struct ImportStatus {
 #[derive(Serialize, Clone)]
 struct Activity {
     client: String,
+    /// Key of the account folder the event is about, if it is about one.
+    account: Option<String>,
     kind: String,
     message: String,
     result: Option<UploadResult>,
@@ -264,11 +347,11 @@ struct AppState {
     settings_path: PathBuf,
     archive_dir: PathBuf,
     release: Mutex<Option<ReleaseCache>>,
-    /// Clients whose last upload could not be archived; their files must not be deleted.
+    /// Accounts whose last upload could not be archived; their files must not be deleted.
     unarchived: Mutex<HashSet<String>>,
-    /// Clients with an upload in flight.
+    /// Accounts with an upload in flight.
     uploading: Mutex<HashSet<String>>,
-    /// Clients whose last upload failed transiently: when the watcher may try again and
+    /// Accounts whose last upload failed transiently: when the watcher may try again and
     /// how many attempts failed in a row.
     retry: Mutex<HashMap<String, RetryState>>,
 }
@@ -280,24 +363,24 @@ struct RetryState {
 }
 
 /// Held for the length of one upload so the button and the watcher never send the same
-/// client's file twice.
+/// account's file twice.
 struct UploadSlot<'a> {
     state: &'a AppState,
-    client_id: String,
+    account: String,
 }
 
 impl Drop for UploadSlot<'_> {
     fn drop(&mut self) {
-        self.state.uploading.lock().unwrap().remove(&self.client_id);
+        self.state.uploading.lock().unwrap().remove(&self.account);
     }
 }
 
 impl AppState {
-    fn try_start_upload(&self, client_id: &str) -> Option<UploadSlot<'_>> {
+    fn try_start_upload(&self, account: &str) -> Option<UploadSlot<'_>> {
         let mut uploading = self.uploading.lock().unwrap();
-        uploading.insert(client_id.to_string()).then(|| UploadSlot {
+        uploading.insert(account.to_string()).then(|| UploadSlot {
             state: self,
-            client_id: client_id.to_string(),
+            account: account.to_string(),
         })
     }
 
@@ -314,11 +397,12 @@ impl AppState {
                     // Kept so nothing is lost when the next change rewrites settings.json.
                     let backup = path.with_extension("json.corrupt");
                     let _ = fs::copy(&path, &backup);
-                    let kept = if settings.user_id.is_some() {
-                        " (user ID kept)"
-                    } else {
-                        ""
-                    };
+                    let kept =
+                        if settings.legacy_user_id.is_some() || !settings.identities.is_empty() {
+                            " (user IDs kept)"
+                        } else {
+                            ""
+                        };
                     eprintln!(
                         "settings.json could not be read; kept as {} and started with defaults{kept}",
                         backup.display()
@@ -340,12 +424,12 @@ impl AppState {
 
     /// Holds the watcher back after a transient failure, honouring the server's
     /// Retry-After when it sent one.
-    fn defer_retry(&self, client_id: &str, retry_after: Option<Duration>) {
+    fn defer_retry(&self, account: &str, retry_after: Option<Duration>) {
         let mut retry = self.retry.lock().unwrap();
-        let attempts = retry.get(client_id).map_or(0, |state| state.attempts) + 1;
+        let attempts = retry.get(account).map_or(0, |state| state.attempts) + 1;
         let delay = retry_after.unwrap_or_else(|| retry_delay(attempts));
         retry.insert(
-            client_id.to_string(),
+            account.to_string(),
             RetryState {
                 attempts,
                 not_before: std::time::Instant::now() + delay,
@@ -353,15 +437,15 @@ impl AppState {
         );
     }
 
-    fn clear_retry(&self, client_id: &str) {
-        self.retry.lock().unwrap().remove(client_id);
+    fn clear_retry(&self, account: &str) {
+        self.retry.lock().unwrap().remove(account);
     }
 
-    fn retry_due(&self, client_id: &str) -> bool {
+    fn retry_due(&self, account: &str) -> bool {
         self.retry
             .lock()
             .unwrap()
-            .get(client_id)
+            .get(account)
             .is_none_or(|state| std::time::Instant::now() >= state.not_before)
     }
 
@@ -390,16 +474,34 @@ impl AppState {
         settings.clone()
     }
 
-    /// The user ID sent with every upload; created here if the settings still lack one.
-    fn user_id(&self) -> String {
-        if let Some(id) = self.snapshot().user_id {
-            return id;
+    /// The user ID a user's uploads are sent with; created here if the settings still lack it.
+    fn user_id(&self, user: &str) -> String {
+        if let Some(identity) = self.snapshot().identities.get(user) {
+            return identity.user_id.clone();
         }
         self.update(|settings| {
-            ensure_user_id(settings);
+            ensure_identities(settings, [user]);
         })
-        .user_id
-        .expect("ensure_user_id sets the ID")
+        .identities[user]
+            .user_id
+            .clone()
+    }
+
+    /// Gives every user of the clients an identity; returns whether one was created.
+    fn ensure_identities(&self, clients: &[ClientStatus]) -> bool {
+        let users = users_of(clients);
+        let snapshot = self.snapshot();
+        if users
+            .iter()
+            .all(|user| snapshot.identities.contains_key(user))
+        {
+            return false;
+        }
+        let mut created = false;
+        self.update(|settings| {
+            created = ensure_identities(settings, users.iter().map(String::as_str))
+        });
+        created
     }
 
     fn snapshot(&self) -> Settings {
@@ -683,24 +785,89 @@ fn flavour_dirs(wow_dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn saved_variables_path(client_dir: &Path) -> Option<PathBuf> {
-    let account_root = client_dir.join("WTF").join("Account");
-    let mut accounts: Vec<PathBuf> = fs::read_dir(&account_root)
-        .ok()?
+/// A WoW account folder of a client.
+#[derive(Debug, Clone, PartialEq)]
+struct AccountDir {
+    name: String,
+    /// The person behind the account: Battle.net names the folders "<account id>#<n>",
+    /// one per WoW licence of the same Battle.net account. Folders without "#" (old
+    /// account names) stand for themselves.
+    bnet_id: String,
+    dir: PathBuf,
+}
+
+impl AccountDir {
+    fn key(&self) -> String {
+        self.dir.to_string_lossy().into_owned()
+    }
+
+    fn file(&self) -> PathBuf {
+        self.dir.join("SavedVariables").join("ForeverCollect.lua")
+    }
+}
+
+fn bnet_id(account_name: &str) -> &str {
+    account_name
+        .split_once('#')
+        .map_or(account_name, |(id, _)| id)
+}
+
+/// Every account folder of a client (`WTF/Account/<name>` with its own SavedVariables),
+/// sorted. `WTF/Account/SavedVariables` holds the account-wide variables of all accounts
+/// and is none.
+fn accounts(client_dir: &Path) -> Vec<AccountDir> {
+    let mut accounts: Vec<AccountDir> = fs::read_dir(client_dir.join("WTF").join("Account"))
+        .into_iter()
+        .flatten()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_dir()
-                && path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().contains('#'))
+        .filter(|path| path.join("SavedVariables").is_dir())
+        .filter_map(|dir| {
+            let name = dir.file_name()?.to_string_lossy().into_owned();
+            (name != "SavedVariables").then(|| AccountDir {
+                bnet_id: bnet_id(&name).to_string(),
+                name,
+                dir,
+            })
         })
         .collect();
-    accounts.sort();
+    accounts.sort_by(|a, b| a.name.cmp(&b.name));
     accounts
+}
+
+const CHARACTER_HINTS: usize = 6;
+
+/// "Character-Realm" of the character folders (`<account>/<realm>/<character>`) the game
+/// keeps per account, at most CHARACTER_HINTS of them.
+fn account_characters(account_dir: &Path) -> Vec<String> {
+    let subdirs = |dir: &Path| -> Vec<(String, PathBuf)> {
+        let mut dirs: Vec<(String, PathBuf)> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .filter_map(|path| Some((path.file_name()?.to_string_lossy().into_owned(), path)))
+            .collect();
+        dirs.sort();
+        dirs
+    };
+    subdirs(account_dir)
         .into_iter()
-        .next()
-        .map(|account| account.join("SavedVariables").join("ForeverCollect.lua"))
+        .filter(|(realm, _)| realm != "SavedVariables")
+        .flat_map(|(realm, path)| {
+            // Newer clients file characters as "Character-Realm" under a numeric folder.
+            let numbered = realm.chars().all(|c| c.is_ascii_digit());
+            subdirs(&path).into_iter().map(move |(character, _)| {
+                if numbered {
+                    character
+                } else {
+                    format!("{character}-{realm}")
+                }
+            })
+        })
+        .take(CHARACTER_HINTS)
+        .collect()
 }
 
 /// True when a process whose executable name is `process_name` runs. Only the
@@ -874,15 +1041,14 @@ fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.bak", path.display()))
 }
 
-fn snapshot_source(client_dir: &Path) -> Option<SnapshotSource> {
-    let path = saved_variables_path(client_dir)?;
-    if file_has_catalogs(&path) {
+fn snapshot_source(path: &Path) -> Option<SnapshotSource> {
+    if file_has_catalogs(path) {
         return Some(SnapshotSource {
-            path,
+            path: path.to_path_buf(),
             from_backup: false,
         });
     }
-    let backup = backup_path(&path);
+    let backup = backup_path(path);
     if file_has_catalogs(&backup) {
         return Some(SnapshotSource {
             path: backup,
@@ -900,43 +1066,62 @@ fn client_status(
     release: Option<&AddonRelease>,
 ) -> ClientStatus {
     let client_dir = Path::new(&def.id);
-    let main_path = saved_variables_path(client_dir);
-    let source = snapshot_source(client_dir);
     let addon_version = addon::installed_version(client_dir);
     let addon_update = release
         .filter(|release| addon::is_newer(&release.version, addon_version.as_deref()))
         .map(|release| release.version.clone());
-    let saved_at = main_path
-        .as_ref()
-        .and_then(|path| modified_at(path))
-        .or_else(|| {
-            main_path
-                .as_ref()
-                .and_then(|path| modified_at(&backup_path(path)))
-        });
+    let accounts: Vec<AccountStatus> = accounts(client_dir)
+        .iter()
+        .map(|account| account_status(settings, account))
+        .collect();
     let running_since = wow_process_started(&def.process).and_then(unix_seconds);
     // A crash only matters if it is younger than the last time the data was secured:
-    // written by the game, or uploaded (which removes the file and its timestamp).
-    let secured_at = saved_at.max(settings.last_upload_at.get(&def.id).copied());
+    // written by the game, or uploaded (which removes the file and its timestamp). The
+    // crash dump does not tell which account played, so the latest one counts.
+    let secured_at = accounts
+        .iter()
+        .filter_map(|account| {
+            account
+                .saved_at
+                .max(settings.last_upload_at.get(&account.key).copied())
+        })
+        .max();
     ClientStatus {
         id: def.id.clone(),
         label: def.label.clone(),
         product: def.product.clone(),
         version,
-        file_exists: main_path.as_ref().is_some_and(|path| path.is_file()),
-        file_has_data: source.is_some(),
-        from_backup: source.as_ref().is_some_and(|source| source.from_backup),
-        file_path: source
-            .map(|source| source.path)
-            .or(main_path)
-            .map(|path| path.to_string_lossy().into_owned()),
+        accounts,
         running: running_since.is_some(),
         custom,
         addon_version,
         addon_update,
-        saved_at,
         running_since,
         crash_at: crash_after(client_dir, secured_at),
+    }
+}
+
+fn account_status(settings: &Settings, account: &AccountDir) -> AccountStatus {
+    let main_path = account.file();
+    let source = snapshot_source(&main_path);
+    AccountStatus {
+        key: account.key(),
+        name: account.name.clone(),
+        bnet_id: account.bnet_id.clone(),
+        characters: account_characters(&account.dir),
+        file_exists: main_path.is_file(),
+        file_has_data: source.is_some(),
+        from_backup: source.as_ref().is_some_and(|source| source.from_backup),
+        saved_at: modified_at(&main_path).or_else(|| modified_at(&backup_path(&main_path))),
+        file_path: source
+            .map(|source| source.path)
+            .unwrap_or(main_path)
+            .to_string_lossy()
+            .into_owned(),
+        linked_account: settings
+            .identities
+            .get(&account.bnet_id)
+            .and_then(|identity| identity.linked_account.clone()),
     }
 }
 
@@ -1005,7 +1190,12 @@ fn clients_among(
 #[tauri::command]
 fn detect_installation(state: tauri::State<'_, AppState>) -> Installation {
     let release = state.cached_release();
-    let (wow_dirs, searched, clients) = active_clients(&state.snapshot(), release.as_ref());
+    let (mut wow_dirs, mut searched, mut clients) =
+        active_clients(&state.snapshot(), release.as_ref());
+    // New users show up with their (inherited) link right away.
+    if state.ensure_identities(&clients) {
+        (wow_dirs, searched, clients) = active_clients(&state.snapshot(), release.as_ref());
+    }
     Installation {
         wow_dir: wow_dirs
             .first()
@@ -1041,7 +1231,9 @@ fn list_client_candidates(state: tauri::State<'_, AppState>) -> Vec<ClientCandid
                 continue;
             }
             candidates.push(ClientCandidate {
-                has_data: saved_variables_path(&dir).is_some_and(|path| file_has_catalogs(&path)),
+                has_data: accounts(&dir)
+                    .iter()
+                    .any(|account| file_has_catalogs(&account.file())),
                 version: versions.get(&def.product).cloned(),
                 id: def.id,
                 label: def.label,
@@ -1215,34 +1407,45 @@ fn is_permanent_rejection(status: reqwest::StatusCode) -> bool {
 /// Remembers the content as handled so the watcher does not touch it again. `secured`
 /// tells a real upload from a permanent rejection: only the former moves the point in
 /// time from which the file counts as secured.
-fn remember_upload(state: &AppState, client_id: &str, content_hash: String, secured: bool) {
+fn remember_upload(state: &AppState, account: &str, content_hash: String, secured: bool) {
     state.update(|settings| {
         settings
             .last_upload_hash
-            .insert(client_id.to_string(), content_hash);
+            .insert(account.to_string(), content_hash);
         if secured {
             if let Some(now) = unix_seconds(std::time::SystemTime::now()) {
-                settings.last_upload_at.insert(client_id.to_string(), now);
+                settings.last_upload_at.insert(account.to_string(), now);
             }
         }
     });
 }
 
-/// Uploads the client's SavedVariables (or their .bak, see `snapshot_source`), keeps an
+/// Uploads an account's SavedVariables (or their .bak, see `snapshot_source`), keeps an
 /// archive copy, and removes the uploaded data so the next session starts empty.
-async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult, String> {
-    let Some(_slot) = state.try_start_upload(client_id) else {
-        return Err("An upload for this client is already running.".to_string());
+async fn upload_client(
+    state: &AppState,
+    client_id: &str,
+    account_key: &str,
+) -> Result<UploadResult, String> {
+    let Some(_slot) = state.try_start_upload(account_key) else {
+        return Err("An upload for this account is already running.".to_string());
     };
     let def = client_by_id(&state.snapshot(), client_id)?;
     let client_dir = Path::new(&def.id);
-    let main_path = saved_variables_path(client_dir).ok_or_else(|| {
-        format!(
+    let accounts = accounts(client_dir);
+    if accounts.is_empty() {
+        return Err(format!(
             "No account folder found under '{}'.",
             client_dir.join("WTF").join("Account").display()
-        )
-    })?;
-    let source = snapshot_source(client_dir).ok_or_else(|| {
+        ));
+    }
+    let account = accounts
+        .into_iter()
+        .find(|account| account.key() == account_key)
+        .ok_or_else(|| format!("The account folder '{account_key}' no longer exists."))?;
+    let main_path = account.file();
+    let label = archive_label(&def.label, &account.name);
+    let source = snapshot_source(&main_path).ok_or_else(|| {
         if main_path.is_file() {
             "The file holds no collected data yet (empty database since the last upload)."
                 .to_string()
@@ -1259,8 +1462,8 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let snapshot = match lua::parse_forever_collect(&content) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            let _ = archive_snapshot(&state.archive_dir, &def.label, None, &content);
-            remember_upload(state, client_id, content_hash, false);
+            let _ = archive_snapshot(&state.archive_dir, &label, None, &content);
+            remember_upload(state, account_key, content_hash, false);
             return Err(format!("Could not read the snapshot: {error}"));
         }
     };
@@ -1268,7 +1471,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
         .map_err(|e| format!("Could not encode the snapshot as JSON: {e}"))?;
     let compressed = gzip(&payload).map_err(|e| format!("Could not prepare the upload: {e}"))?;
 
-    let user_id = state.user_id();
+    let user_id = state.user_id(&account.bnet_id);
     let http = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(UPLOAD_TIMEOUT)
@@ -1285,7 +1488,7 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
         .send()
         .await
         .map_err(|e| {
-            state.defer_retry(client_id, None);
+            state.defer_retry(account_key, None);
             format!("Upload failed: {e}")
         })?;
     let status = response.status();
@@ -1294,11 +1497,11 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     if !status.is_success() {
         // A permanent rejection always repeats itself for the same content.
         if is_permanent_rejection(status) {
-            state.clear_retry(client_id);
-            let _ = archive_snapshot(&state.archive_dir, &def.label, None, &content);
-            remember_upload(state, client_id, content_hash, false);
+            state.clear_retry(account_key);
+            let _ = archive_snapshot(&state.archive_dir, &label, None, &content);
+            remember_upload(state, account_key, content_hash, false);
         } else {
-            state.defer_retry(client_id, wait);
+            state.defer_retry(account_key, wait);
         }
         return Err(format!(
             "The server rejected the upload ({}): {}",
@@ -1309,20 +1512,15 @@ async fn upload_client(state: &AppState, client_id: &str) -> Result<UploadResult
     let import_id = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|json| json.get("id").and_then(|id| id.as_str()).map(str::to_owned));
-    state.clear_retry(client_id);
-    remember_upload(state, client_id, content_hash, true);
-    let archived = archive_snapshot(
-        &state.archive_dir,
-        &def.label,
-        import_id.as_deref(),
-        &content,
-    );
+    state.clear_retry(account_key);
+    remember_upload(state, account_key, content_hash, true);
+    let archived = archive_snapshot(&state.archive_dir, &label, import_id.as_deref(), &content);
     {
         let mut unarchived = state.unarchived.lock().unwrap();
         if archived.is_ok() {
-            unarchived.remove(client_id);
+            unarchived.remove(account_key);
         } else {
-            unarchived.insert(client_id.to_string());
+            unarchived.insert(account_key.to_string());
         }
     }
 
@@ -1394,11 +1592,7 @@ fn archive_snapshot(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let name = format!(
-        "{stamp}-{}-{}.lua",
-        label.replace(' ', "_"),
-        archive_id(import_id)
-    );
+    let name = format!("{stamp}-{label}-{}.lua", archive_id(import_id));
     let archived = archive_dir.join(name);
     fs::write(&archived, content).map_err(|e| format!("Could not write the archive copy: {e}"))?;
     let mut files: Vec<PathBuf> = fs::read_dir(archive_dir)
@@ -1413,6 +1607,23 @@ fn archive_snapshot(
         let _ = fs::remove_file(old);
     }
     Ok(archived)
+}
+
+/// Client and account in a form fit for a file name ("Classic Era", "1234#1" ->
+/// "Classic_Era-1234_1").
+fn archive_label(client_label: &str, account_name: &str) -> String {
+    let clean = |text: &str| -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    format!("{}-{}", clean(client_label), clean(account_name))
 }
 
 /// The import id comes from the server and ends up in a file name, so anything but a
@@ -1435,9 +1646,10 @@ async fn upload(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     client: String,
+    account: String,
 ) -> Result<UploadResult, String> {
-    let result = upload_client(&state, &client).await?;
-    follow_import(&app, &client, &result);
+    let result = upload_client(&state, &client, &account).await?;
+    follow_import(&app, &client, &account, &result);
     Ok(result)
 }
 
@@ -1482,13 +1694,14 @@ fn link_rejection(status: reqwest::StatusCode) -> String {
     .to_string()
 }
 
-/// Redeems a pairing code from the profile page, which links the user ID to that account.
+/// Redeems a pairing code from the profile page, which links the user ID of `user` (a
+/// Battle.net account, see `AccountDir::bnet_id`) to that ForeverDB account.
 #[tauri::command]
 async fn link_account(
-    app: AppHandle,
     state: tauri::State<'_, AppState>,
     code: String,
-) -> Result<SettingsView, String> {
+    user: String,
+) -> Result<String, String> {
     let code = code.trim();
     if code.is_empty() {
         return Err("Enter the code from your profile on foreverdb.app.".to_string());
@@ -1504,7 +1717,7 @@ async fn link_account(
             api_url().trim_end_matches('/')
         ))
         .header("X-ForeverDB-Client", CLIENT_TAG)
-        .json(&serde_json::json!({ "uploaderId": state.user_id(), "code": code }))
+        .json(&serde_json::json!({ "uploaderId": state.user_id(&user), "code": code }))
         .send()
         .await
         .map_err(|e| format!("Could not reach ForeverDB: {e}"))?;
@@ -1518,9 +1731,12 @@ async fn link_account(
         .ok()
         .and_then(|json| json.get("account")?.as_str().map(str::to_owned))
         .unwrap_or_else(|| "your account".to_string());
-    Ok(state
-        .update(|settings| settings.linked_account = Some(account))
-        .view(&app))
+    state.update(|settings| {
+        if let Some(identity) = settings.identities.get_mut(&user) {
+            identity.linked_account = Some(account.clone());
+        }
+    });
+    Ok(account)
 }
 
 /// Adds or removes the system's autostart entry (Linux: ~/.config/autostart, Windows:
@@ -1619,6 +1835,7 @@ async fn watch_releases(app: AppHandle) {
                     emit_activity(
                         &app,
                         "",
+                        None,
                         "update",
                         format!(
                             "ForeverCollect v{} is available (outdated in: {}).",
@@ -1632,6 +1849,7 @@ async fn watch_releases(app: AppHandle) {
             Err(error) => emit_activity(
                 &app,
                 "",
+                None,
                 "error",
                 format!("Addon update check: {error}"),
                 None,
@@ -1648,6 +1866,7 @@ const SETTLE_TIME: Duration = Duration::from_secs(3);
 fn emit_activity(
     app: &AppHandle,
     client: &str,
+    account: Option<&str>,
     kind: &str,
     message: String,
     result: Option<UploadResult>,
@@ -1656,6 +1875,7 @@ fn emit_activity(
         "activity",
         Activity {
             client: client.to_string(),
+            account: account.map(str::to_owned),
             kind: kind.to_string(),
             message,
             result,
@@ -1673,7 +1893,7 @@ const POLL_MAX_FAILURES: u32 = 10;
 
 /// Follows an accepted import on the server until it is completed or failed and
 /// reports every status change to the window.
-async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
+async fn poll_import(app: AppHandle, client_id: String, account: String, import_id: String) {
     let url = status_url(&target_url(), &import_id);
     let Ok(http) = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -1695,6 +1915,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
                 emit_import(
                     &app,
                     &client_id,
+                    &account,
                     ImportStatus {
                         import_id,
                         status: "failed".into(),
@@ -1711,6 +1932,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
                 emit_activity(
                     &app,
                     &client_id,
+                    Some(&account),
                     "error",
                     format!(
                         "Cannot fetch the status of import {import_id}; please check again later."
@@ -1735,6 +1957,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
             emit_import(
                 &app,
                 &client_id,
+                &account,
                 ImportStatus {
                     import_id: import_id.clone(),
                     status: status.clone(),
@@ -1750,6 +1973,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
             emit_activity(
                 &app,
                 &client_id,
+                Some(&account),
                 "error",
                 format!(
                     "Import {import_id} has not finished after {} minutes.",
@@ -1762,7 +1986,7 @@ async fn poll_import(app: AppHandle, client_id: String, import_id: String) {
     }
 }
 
-fn emit_import(app: &AppHandle, client: &str, import: ImportStatus) {
+fn emit_import(app: &AppHandle, client: &str, account: &str, import: ImportStatus) {
     let (kind, message) = match import.status.as_str() {
         "processing" => (
             "processing",
@@ -1789,6 +2013,7 @@ fn emit_import(app: &AppHandle, client: &str, import: ImportStatus) {
         "activity",
         Activity {
             client: client.to_string(),
+            account: Some(account.to_string()),
             kind: kind.to_string(),
             message,
             result: None,
@@ -1798,9 +2023,14 @@ fn emit_import(app: &AppHandle, client: &str, import: ImportStatus) {
 }
 
 /// Starts following the import an upload produced, if the server returned one.
-fn follow_import(app: &AppHandle, client_id: &str, result: &UploadResult) {
+fn follow_import(app: &AppHandle, client_id: &str, account: &str, result: &UploadResult) {
     if let Some(id) = &result.import_id {
-        tauri::async_runtime::spawn(poll_import(app.clone(), client_id.to_string(), id.clone()));
+        tauri::async_runtime::spawn(poll_import(
+            app.clone(),
+            client_id.to_string(),
+            account.to_string(),
+            id.clone(),
+        ));
     }
 }
 
@@ -1827,100 +2057,116 @@ fn should_delete(already_uploaded: bool, running: bool) -> bool {
     already_uploaded && !running
 }
 
-/// Watches the SavedVariables of every active client and uploads each new write.
+/// Watches the SavedVariables of every account of every active client and uploads each
+/// new write.
 async fn watch_and_upload(app: AppHandle) {
     loop {
         tokio_sleep(WATCH_INTERVAL).await;
         let state = app.state::<AppState>();
-        let settings = state.snapshot();
-        if !settings.auto_upload {
+        if !state.snapshot().auto_upload {
             continue;
         }
-        let (_, _, clients) = active_clients(&settings, None);
-        for client in clients {
-            let Some(path) = client.file_path.as_ref().map(PathBuf::from) else {
-                continue;
-            };
-            let already_uploaded = file_hash(&path)
-                .is_some_and(|hash| settings.last_upload_hash.get(&client.id) == Some(&hash));
-            if should_delete(already_uploaded, client.running) {
-                let main_path = saved_variables_path(Path::new(&client.id));
-                let source = SnapshotSource {
-                    path: path.clone(),
-                    from_backup: client.from_backup,
-                };
-                if let Some(main_path) = main_path {
-                    // No archive copy yet: retry it, and keep the file if that fails too.
-                    if state.unarchived.lock().unwrap().contains(&client.id) {
-                        let archived =
-                            fs::read(&path)
-                                .map_err(|e| e.to_string())
-                                .and_then(|content| {
-                                    archive_snapshot(
-                                        &state.archive_dir,
-                                        &client.label,
-                                        None,
-                                        &content,
-                                    )
-                                });
-                        if archived.is_err() {
-                            continue;
-                        }
-                        state.unarchived.lock().unwrap().remove(&client.id);
-                    }
-                    if delete_uploaded_snapshot(&source, &main_path, false) {
-                        emit_activity(
-                            &app,
-                            &client.id,
-                            "cleaned",
-                            format!(
-                                "{}: uploaded data cleared after the game closed; settings kept.",
-                                client.label
-                            ),
-                            None,
-                        );
-                    }
-                }
-                continue;
-            }
-            if !should_upload(client.file_has_data, is_settled(&path), already_uploaded) {
-                continue;
-            }
-            if state.uploading.lock().unwrap().contains(&client.id) || !state.retry_due(&client.id)
-            {
-                continue;
-            }
-            emit_activity(
-                &app,
-                &client.id,
-                "pending",
-                if client.from_backup {
-                    format!(
-                        "{}: found a backup with data not yet uploaded, starting upload.",
-                        client.label
-                    )
-                } else {
-                    format!("{}: new data written, starting upload.", client.label)
-                },
-                None,
-            );
-            match upload_client(&state, &client.id).await {
-                Ok(result) => {
-                    follow_import(&app, &client.id, &result);
-                    emit_activity(
-                        &app,
-                        &client.id,
-                        "uploaded",
-                        match &result.import_id {
-                            Some(id) => format!("Upload succeeded (import ID {id})."),
-                            None => "Upload succeeded.".to_string(),
-                        },
-                        Some(result),
-                    )
-                }
-                Err(error) => emit_activity(&app, &client.id, "error", error, None),
+        let (_, _, clients) = active_clients(&state.snapshot(), None);
+        state.ensure_identities(&clients);
+        let settings = state.snapshot();
+        for client in &clients {
+            for account in &client.accounts {
+                watch_account(&app, &state, &settings, client, account).await;
             }
         }
+    }
+}
+
+async fn watch_account(
+    app: &AppHandle,
+    state: &AppState,
+    settings: &Settings,
+    client: &ClientStatus,
+    account: &AccountStatus,
+) {
+    let key = account.key.as_str();
+    let name = format!("{} · {}", client.label, account.name);
+    let path = PathBuf::from(&account.file_path);
+    let already_uploaded =
+        file_hash(&path).is_some_and(|hash| settings.last_upload_hash.get(key) == Some(&hash));
+    if should_delete(already_uploaded, client.running) {
+        let main_path = Path::new(key)
+            .join("SavedVariables")
+            .join("ForeverCollect.lua");
+        let source = SnapshotSource {
+            path: path.clone(),
+            from_backup: account.from_backup,
+        };
+        // No archive copy yet: retry it, and keep the file if that fails too.
+        if state.unarchived.lock().unwrap().contains(key) {
+            let archived = fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| {
+                    archive_snapshot(
+                        &state.archive_dir,
+                        &archive_label(&client.label, &account.name),
+                        None,
+                        &content,
+                    )
+                });
+            if archived.is_err() {
+                return;
+            }
+            state.unarchived.lock().unwrap().remove(key);
+        }
+        if delete_uploaded_snapshot(&source, &main_path, false) {
+            emit_activity(
+                app,
+                &client.id,
+                Some(key),
+                "cleaned",
+                format!("{name}: uploaded data cleared after the game closed; settings kept."),
+                None,
+            );
+        }
+        return;
+    }
+    if !should_upload(account.file_has_data, is_settled(&path), already_uploaded) {
+        return;
+    }
+    if state.uploading.lock().unwrap().contains(key) || !state.retry_due(key) {
+        return;
+    }
+    emit_activity(
+        app,
+        &client.id,
+        Some(key),
+        "pending",
+        if account.from_backup {
+            format!("{name}: found a backup with data not yet uploaded, starting upload.")
+        } else {
+            format!("{name}: new data written, starting upload.")
+        },
+        None,
+    );
+    match upload_client(state, &client.id, key).await {
+        Ok(result) => {
+            follow_import(app, &client.id, key, &result);
+            emit_activity(
+                app,
+                &client.id,
+                Some(key),
+                "uploaded",
+                match &result.import_id {
+                    Some(id) => format!("{name}: upload succeeded (import ID {id})."),
+                    None => format!("{name}: upload succeeded."),
+                },
+                Some(result),
+            )
+        }
+        Err(error) => emit_activity(
+            app,
+            &client.id,
+            Some(key),
+            "error",
+            format!("{name}: {error}"),
+            None,
+        ),
     }
 }
 
@@ -2052,11 +2298,6 @@ pub fn run() {
                 .map(|dir| dir.join("archive"))
                 .unwrap_or_else(|| PathBuf::from("foreverdb-uploader-archive"));
             let state = AppState::load(settings_path, archive_dir);
-            if state.snapshot().user_id.is_none() {
-                state.update(|settings| {
-                    ensure_user_id(settings);
-                });
-            }
             app.manage(state);
             build_tray(app)?;
             // The window starts hidden (tauri.conf.json) so an autostart never flashes it.
@@ -2353,19 +2594,72 @@ mod tests {
     }
 
     #[test]
-    fn creates_the_user_id_once() {
+    fn creates_each_identity_once() {
         let mut settings = Settings::default();
-        assert!(ensure_user_id(&mut settings));
-        let id = settings.user_id.clone().unwrap();
-        assert!(uuid::Uuid::parse_str(&id).is_ok(), "{id}");
-        assert!(!ensure_user_id(&mut settings));
-        assert_eq!(settings.user_id.as_deref(), Some(id.as_str()));
+        assert!(ensure_identities(&mut settings, ["1", "2"]));
+        let first = settings.identities["1"].user_id.clone();
+        let second = settings.identities["2"].user_id.clone();
+        assert!(uuid::Uuid::parse_str(&first).is_ok(), "{first}");
+        assert_ne!(first, second);
+        assert!(!ensure_identities(&mut settings, ["2", "1"]));
+        assert_eq!(settings.identities["1"].user_id, first);
 
         let stored: Settings =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
-        assert_eq!(stored.user_id.as_deref(), Some(id.as_str()));
-        let legacy: Settings = serde_json::from_str(r#"{"auto_upload":true}"#).unwrap();
-        assert!(legacy.user_id.is_none());
+        assert_eq!(stored.identities, settings.identities);
+    }
+
+    #[test]
+    fn the_first_user_takes_over_the_legacy_identity() {
+        let content = r#"{"user_id": "u-1", "linked_account": "Alex"}"#;
+        let mut settings: Settings = serde_json::from_str(content).unwrap();
+        assert!(ensure_identities(&mut settings, ["111", "222"]));
+        assert_eq!(
+            settings.identities["111"],
+            Identity {
+                user_id: "u-1".into(),
+                linked_account: Some("Alex".into())
+            }
+        );
+        assert_ne!(settings.identities["222"].user_id, "u-1");
+        assert_eq!(settings.identities["222"].linked_account, None);
+        let stored = serde_json::to_value(&settings).unwrap();
+        assert!(stored.get("user_id").is_none() && stored.get("linked_account").is_none());
+    }
+
+    #[test]
+    fn battle_net_accounts_get_their_identity_first() {
+        let account = |name: &str| AccountStatus {
+            key: format!("/wow/WTF/Account/{name}"),
+            name: name.into(),
+            bnet_id: bnet_id(name).into(),
+            characters: vec![],
+            file_path: String::new(),
+            file_exists: false,
+            file_has_data: false,
+            from_backup: false,
+            saved_at: None,
+            linked_account: None,
+        };
+        let client = ClientStatus {
+            id: "/wow/_classic_era_".into(),
+            label: "Classic Era".into(),
+            product: "wow_classic_era".into(),
+            version: None,
+            accounts: vec![
+                account("ALEX"),
+                account("222#1"),
+                account("111#1"),
+                account("222#2"),
+            ],
+            running: false,
+            custom: false,
+            addon_version: None,
+            addon_update: None,
+            running_since: None,
+            crash_at: None,
+        };
+        assert_eq!(users_of(&[client]), vec!["222", "111", "ALEX"]);
     }
 
     #[test]
@@ -2513,22 +2807,86 @@ mod tests {
         let empty = "ForeverCollectDB = {\n[\"catalogs\"] = {\n},\n[\"schemaVersion\"] = 9,\n}\n";
         let filled = "ForeverCollectDB = {\n[\"catalogs\"] = {\n[\"1:16001:0:enUS:9:7:Alliance\"] = {\n},\n},\n}\n";
 
-        assert!(snapshot_source(&root).is_none(), "no files");
+        assert!(snapshot_source(&main).is_none(), "no files");
         fs::write(&main, empty).unwrap();
-        assert!(snapshot_source(&root).is_none(), "empty database only");
+        assert!(snapshot_source(&main).is_none(), "empty database only");
         fs::write(&backup, filled).unwrap();
-        let source = snapshot_source(&root).unwrap();
+        let source = snapshot_source(&main).unwrap();
         assert!(
             source.from_backup && source.path == backup,
             "backup holds the last session"
         );
         fs::write(&main, filled).unwrap();
-        let source = snapshot_source(&root).unwrap();
+        let source = snapshot_source(&main).unwrap();
         assert!(
             !source.from_backup && source.path == main,
             "current file wins when it has data"
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn finds_every_account_of_a_client() {
+        let root = temp_dir("accounts");
+        let account_root = root.join("WTF").join("Account");
+        for name in ["222#1", "111#2", "111#1", "LEGACY", "SavedVariables"] {
+            fs::create_dir_all(account_root.join(name).join("SavedVariables")).unwrap();
+        }
+        fs::create_dir_all(account_root.join("333#1")).unwrap();
+        fs::create_dir_all(
+            account_root
+                .join("111#1")
+                .join("Wild Growth")
+                .join("Strokkur"),
+        )
+        .unwrap();
+        fs::create_dir_all(account_root.join("111#1").join("Lucifron").join("Vizh")).unwrap();
+        fs::create_dir_all(
+            account_root
+                .join("222#1")
+                .join("70")
+                .join("Dipling-Strokkur"),
+        )
+        .unwrap();
+
+        let found = accounts(&root);
+        let names: Vec<&str> = found.iter().map(|account| account.name.as_str()).collect();
+        assert_eq!(names, vec!["111#1", "111#2", "222#1", "LEGACY"]);
+        let users: Vec<&str> = found
+            .iter()
+            .map(|account| account.bnet_id.as_str())
+            .collect();
+        assert_eq!(users, vec!["111", "111", "222", "LEGACY"]);
+        assert_eq!(
+            found[0].file(),
+            account_root.join("111#1/SavedVariables/ForeverCollect.lua")
+        );
+        assert_eq!(
+            account_characters(&found[0].dir),
+            vec!["Vizh-Lucifron", "Strokkur-Wild Growth"]
+        );
+        assert_eq!(account_characters(&found[2].dir), vec!["Dipling-Strokkur"]);
+        assert!(accounts(&root.join("missing")).is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn remembers_uploads_per_account() {
+        let dir = temp_dir("remember-upload");
+        let state = AppState::load(dir.join("settings.json"), dir.join("archive"));
+        remember_upload(&state, "/wow/WTF/Account/1#1", "a".into(), true);
+        remember_upload(&state, "/wow/WTF/Account/2#1", "b".into(), false);
+        let settings = state.snapshot();
+        assert_eq!(settings.last_upload_hash["/wow/WTF/Account/1#1"], "a");
+        assert_eq!(settings.last_upload_hash["/wow/WTF/Account/2#1"], "b");
+        assert!(settings.last_upload_at.contains_key("/wow/WTF/Account/1#1"));
+        assert!(!settings.last_upload_at.contains_key("/wow/WTF/Account/2#1"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn archive_label_fits_a_file_name() {
+        assert_eq!(archive_label("Classic Era", "1234#1"), "Classic_Era-1234_1");
     }
 
     #[test]
@@ -2578,15 +2936,19 @@ mod tests {
         println!("wow_dirs = {wow_dirs:?}");
         for client in &clients {
             println!(
-                "{} [{}] {:?} file={:?} exists={} running={} custom={}",
-                client.label,
-                client.product,
-                client.version,
-                client.file_path,
-                client.file_exists,
-                client.running,
-                client.custom
+                "{} [{}] {:?} running={} custom={}",
+                client.label, client.product, client.version, client.running, client.custom
             );
+            for account in &client.accounts {
+                println!(
+                    "  {} ({}) file={} exists={} characters={:?}",
+                    account.name,
+                    account.bnet_id,
+                    account.file_path,
+                    account.file_exists,
+                    account.characters
+                );
+            }
         }
         if !wow_dirs.is_empty() {
             assert!(
@@ -2628,15 +2990,19 @@ mod tests {
         let (settings, corrupt) = parse_settings(content);
         assert!(!corrupt);
         assert!(!settings.auto_upload);
-        assert_eq!(settings.user_id.as_deref(), Some("u-1"));
+        assert_eq!(settings.legacy_user_id.as_deref(), Some("u-1"));
         assert_eq!(settings.extra_clients, vec!["x".to_string()]);
     }
 
     #[test]
-    fn keeps_the_user_id_of_settings_with_a_wrong_type() {
-        let (settings, corrupt) = parse_settings(r#"{"auto_upload": "yes", "user_id": "u-1"}"#);
+    fn keeps_the_user_ids_of_settings_with_a_wrong_type() {
+        let (settings, corrupt) = parse_settings(
+            r#"{"auto_upload": "yes", "user_id": "u-1", "identities": {"1": {"user_id": "u-2"}, "2": {"user_id": 5}}}"#,
+        );
         assert!(corrupt);
-        assert_eq!(settings.user_id.as_deref(), Some("u-1"));
+        assert_eq!(settings.legacy_user_id.as_deref(), Some("u-1"));
+        assert_eq!(settings.identities.len(), 1);
+        assert_eq!(settings.identities["1"].user_id, "u-2");
         assert!(settings.auto_upload);
     }
 
@@ -2645,7 +3011,7 @@ mod tests {
         for content in ["", "not json", r#"{"user_id": 5}"#] {
             let (settings, corrupt) = parse_settings(content);
             assert!(corrupt, "{content:?}");
-            assert!(settings.user_id.is_none(), "{content:?}");
+            assert!(settings.legacy_user_id.is_none(), "{content:?}");
         }
     }
 
@@ -2656,7 +3022,7 @@ mod tests {
         let content = r#"{"auto_upload": 1, "user_id": "u-1"}"#;
         fs::write(&path, content).unwrap();
         let state = AppState::load(path, dir.join("archive"));
-        assert_eq!(state.snapshot().user_id.as_deref(), Some("u-1"));
+        assert_eq!(state.snapshot().legacy_user_id.as_deref(), Some("u-1"));
         let backup = fs::read_to_string(dir.join("settings.json.corrupt")).unwrap();
         assert_eq!(backup, content);
     }

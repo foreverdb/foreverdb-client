@@ -108,7 +108,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           tagName: v__VERSION__
-          releaseName: ForeverDB Uploader v__VERSION__
+          releaseName: v__VERSION__
           releaseBody: See the assets below to download and install ForeverDB Uploader v__VERSION__.
           releaseDraft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
