@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -74,6 +75,7 @@ function accountHint(accounts: AccountStatus[]) {
   return characters.length > 0 ? characters.slice(0, 4).join(", ") : accounts.map((account) => account.name).join(", ");
 }
 type AddonRelease = { version: string; name: string; notes: string; published_at: string; html_url: string; asset_name: string; asset_size: number };
+type UploaderUpdate = { current: string; latest: { version: string; published_at: string; html_url: string }; available: boolean };
 type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
@@ -138,6 +140,10 @@ function App() {
   // Outcome of the last check by hand, so a check that finds nothing does not look like no check at all.
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState("");
+  const [uploaderUpdate, setUploaderUpdate] = useState<UploaderUpdate | null>(null);
+  const [version, setVersion] = useState("");
+  // Outcome of a check by hand in the footer: "" (none), "checking" or the message to show.
+  const [uploaderCheck, setUploaderCheck] = useState("");
   const [installing, setInstalling] = useState(false);
   const [installed, setInstalled] = useState<InstallResult | null>(null);
   // Pairing codes, the user being linked and link errors, per user (bnet_id).
@@ -203,6 +209,31 @@ function App() {
     void checkRelease(false);
   }, [checkRelease]);
 
+  const checkUploader = useCallback(async (force: boolean) => {
+    const found = await invoke<UploaderUpdate>("check_uploader_update", { force });
+    setUploaderUpdate(found);
+    return found;
+  }, []);
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    // The background check reports its failures in the activity list.
+    checkUploader(false).catch(() => undefined);
+  }, [checkUploader]);
+
+  async function checkUploaderByHand() {
+    setUploaderCheck("checking");
+    try {
+      const found = await checkUploader(true);
+      setUploaderCheck(found.available ? "" : `Up to date (latest release: v${found.latest.version})`);
+    } catch (message) {
+      setUploaderCheck(String(message));
+    }
+  }
+
   async function installAddon() {
     if (!client) return;
     setInstalling(true);
@@ -238,14 +269,17 @@ function App() {
       if (event.payload.kind === "cleaned" && event.payload.account === uploadAccountRef.current) {
         setResult((current) => current && { ...current, running: false, deleted: true });
       }
-      if (event.payload.kind === "update") void checkRelease(false);
+      if (event.payload.kind === "update") {
+        void checkRelease(false);
+        checkUploader(false).catch(() => undefined);
+      }
       void refresh();
     });
     return () => {
       active = false;
       void unlisten.then((stop) => stop());
     };
-  }, [refresh, checkRelease]);
+  }, [refresh, checkRelease, checkUploader]);
 
   async function openAddDialog() {
     try {
@@ -350,6 +384,16 @@ function App() {
         <span className="wordmark">ForeverDB</span>
         <span className="masthead-tag">Uploader</span>
       </header>
+
+      {uploaderUpdate?.available && (
+        <div className="notice update-notice">
+          <strong>ForeverDB Uploader v{uploaderUpdate.latest.version} is available</strong>
+          <span>
+            Installed: v{uploaderUpdate.current} ·{" "}
+            <button className="link" onClick={() => void openUrl(uploaderUpdate.latest.html_url)}>Download</button>
+          </span>
+        </div>
+      )}
 
       <section className="hero">
         <p className="eyebrow">ForeverCollect · Desktop uploader</p>
@@ -622,7 +666,14 @@ function App() {
           </div>
         </div>
       )}
-      <footer>ForeverDB Uploader <span>·</span> {settings?.auto_upload ? "Watching for new data" : "Not watching"}</footer>
+      <footer>
+        ForeverDB Uploader{version && ` v${version}`} <span>·</span> {settings?.auto_upload ? "Watching for new data" : "Not watching"} <span>·</span>{" "}
+        {uploaderCheck === "" || uploaderCheck === "checking"
+          ? <button className="link" onClick={() => void checkUploaderByHand()} disabled={uploaderCheck === "checking"}>
+              {uploaderCheck === "checking" ? "Checking …" : "Check for uploader updates"}
+            </button>
+          : uploaderCheck}
+      </footer>
     </main>
   );
 }

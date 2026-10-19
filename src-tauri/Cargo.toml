@@ -34,6 +34,8 @@ uuid = { version = "1", features = ["v4"] }
 # Start with the system; one instance only (a second start shows the running one).
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+# Desktop notifications for new uploader and addon releases.
+tauri-plugin-notification = "2"
 
 # Windows only: canonical paths, the launcher's registry entries, process list.
 [target.'cfg(target_os = "windows")'.dependencies]

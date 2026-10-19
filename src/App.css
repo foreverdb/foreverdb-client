@@ -72,6 +72,8 @@ h1 { margin: 0; font: 600 clamp(28px, 5.5vw, 44px)/1.1 var(--font-heading); lett
 .muted, small { color: var(--muted-foreground); font-size: 12px; }
 footer { text-align: center; margin-top: 38px; color: var(--muted-foreground); font-size: 12px; }
 footer span { padding: 0 6px; color: var(--brand-gold); }
+footer .link { font-size: 12px; }
+.update-notice { margin: 0 0 18px; }
 
 /* Surfaces: rounded, a shade above the page, a thin highlight along the top edge */
 .card { margin-top: 14px; padding: 25px; border-radius: calc(var(--radius) * 2.2); background: color-mix(in oklch, var(--card) 70%, transparent); box-shadow: var(--surface-highlight); }

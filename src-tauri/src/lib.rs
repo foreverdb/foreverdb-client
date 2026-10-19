@@ -8,14 +8,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
 
 mod addon;
 mod lua;
+mod update;
 use addon::AddonRelease;
+use update::UploaderRelease;
 
 // The user only picks a WoW client; installation directory, account, file and
 // upload target are derived. A client is a flavour folder such as
@@ -180,6 +184,12 @@ struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     legacy_linked_account: Option<String>,
+    /// The newest uploader and addon versions a desktop notification was shown for, so
+    /// each release is notified once and not on every start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified_uploader_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified_addon_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -313,9 +323,9 @@ impl Settings {
 
 /// Cached answer of the last release check.
 #[derive(Clone)]
-struct ReleaseCache {
+struct ReleaseCache<T> {
     checked_at: std::time::Instant,
-    result: Result<AddonRelease, String>,
+    result: Result<T, String>,
 }
 
 fn default_true() -> bool {
@@ -346,7 +356,8 @@ struct AppState {
     settings: Mutex<Settings>,
     settings_path: PathBuf,
     archive_dir: PathBuf,
-    release: Mutex<Option<ReleaseCache>>,
+    release: Mutex<Option<ReleaseCache<AddonRelease>>>,
+    uploader_release: Mutex<Option<ReleaseCache<UploaderRelease>>>,
     /// Accounts whose last upload could not be archived; their files must not be deleted.
     unarchived: Mutex<HashSet<String>>,
     /// Accounts with an upload in flight.
@@ -416,6 +427,7 @@ impl AppState {
             settings_path: path,
             archive_dir,
             release: Mutex::new(None),
+            uploader_release: Mutex::new(None),
             unarchived: Mutex::new(HashSet::new()),
             uploading: Mutex::new(HashSet::new()),
             retry: Mutex::new(HashMap::new()),
@@ -1777,12 +1789,55 @@ async fn latest_release(state: &AppState, force: bool) -> Result<AddonRelease, S
     result
 }
 
+/// Asks GitHub for the latest uploader release, or returns the cached answer.
+async fn latest_uploader_release(state: &AppState, force: bool) -> Result<UploaderRelease, String> {
+    if !force {
+        if let Some(cache) = state.uploader_release.lock().unwrap().clone() {
+            if cache.checked_at.elapsed() < RELEASE_CHECK_INTERVAL {
+                return cache.result;
+            }
+        }
+    }
+    let result = update::fetch_latest_release().await;
+    *state.uploader_release.lock().unwrap() = Some(ReleaseCache {
+        checked_at: std::time::Instant::now(),
+        result: result.clone(),
+    });
+    result
+}
+
 #[tauri::command]
 async fn check_addon_update(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     force: bool,
 ) -> Result<AddonRelease, String> {
-    latest_release(&state, force).await
+    let result = latest_release(&state, force).await;
+    refresh_tray(&app);
+    result
+}
+
+/// The running version and the latest release, for the window.
+#[derive(Serialize)]
+struct UploaderUpdate {
+    current: String,
+    latest: UploaderRelease,
+    available: bool,
+}
+
+#[tauri::command]
+async fn check_uploader_update(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    force: bool,
+) -> Result<UploaderUpdate, String> {
+    let result = latest_uploader_release(&state, force).await;
+    refresh_tray(&app);
+    result.map(|latest| UploaderUpdate {
+        current: update::CURRENT_VERSION.to_string(),
+        available: latest.is_update(),
+        latest,
+    })
 }
 
 #[derive(Serialize)]
@@ -1794,6 +1849,7 @@ struct InstallResult {
 
 #[tauri::command]
 async fn install_addon(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     client: String,
 ) -> Result<InstallResult, String> {
@@ -1807,6 +1863,7 @@ async fn install_addon(
     })
     .await
     .map_err(|e| format!("Installation aborted: {e}"))??;
+    refresh_tray(&app);
     Ok(InstallResult {
         version: release.version,
         addon_dir: addon::addon_dir(Path::new(&def.id))
@@ -1816,45 +1873,148 @@ async fn install_addon(
     })
 }
 
-/// Checks for a new addon release on start and every RELEASE_CHECK_INTERVAL and
-/// reports it to the window.
-async fn watch_releases(app: AppHandle) {
-    let mut announced: Option<String> = None;
-    loop {
-        let state = app.state::<AppState>();
-        match latest_release(&state, true).await {
-            Ok(release) => {
-                let (_, _, clients) = active_clients(&state.snapshot(), Some(&release));
-                let outdated: Vec<String> = clients
-                    .iter()
-                    .filter(|client| client.addon_update.is_some())
-                    .map(|client| client.label.clone())
-                    .collect();
-                if !outdated.is_empty() && announced.as_deref() != Some(&release.version) {
-                    announced = Some(release.version.clone());
-                    emit_activity(
-                        &app,
-                        "",
-                        None,
-                        "update",
-                        format!(
-                            "ForeverCollect v{} is available (outdated in: {}).",
-                            release.version,
+/// Labels of the clients whose installed addon is older than `release`.
+fn outdated_clients(settings: &Settings, release: &AddonRelease) -> Vec<String> {
+    let (_, _, clients) = active_clients(settings, Some(release));
+    clients
+        .into_iter()
+        .filter(|client| client.addon_update.is_some())
+        .map(|client| client.label)
+        .collect()
+}
+
+/// What a release check found and whether it is news, see `announce_updates`.
+struct Updates {
+    uploader: Result<UploaderRelease, String>,
+    addon: Result<AddonRelease, String>,
+}
+
+async fn check_updates(app: &AppHandle, force: bool) -> Updates {
+    let state = app.state::<AppState>();
+    let updates = Updates {
+        uploader: latest_uploader_release(&state, force).await,
+        addon: latest_release(&state, force).await,
+    };
+    refresh_tray(app);
+    updates
+}
+
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Reports new releases to the window (once per session) and as a desktop notification
+/// (once per version, remembered in the settings). A check by hand reports everything,
+/// including that nothing is new.
+fn announce_updates(
+    app: &AppHandle,
+    updates: &Updates,
+    by_hand: bool,
+    announced: &mut HashSet<String>,
+) {
+    let state = app.state::<AppState>();
+    let settings = state.snapshot();
+    let mut news = false;
+
+    match &updates.uploader {
+        Ok(release) if release.is_update() => {
+            news = true;
+            let message = format!(
+                "ForeverDB Uploader v{} is available (installed: v{}).",
+                release.version,
+                update::CURRENT_VERSION
+            );
+            if by_hand || announced.insert(format!("uploader {}", release.version)) {
+                emit_activity(app, "", None, "update", message, None);
+            }
+            if by_hand || settings.notified_uploader_version.as_ref() != Some(&release.version) {
+                notify(
+                    app,
+                    &format!("ForeverDB Uploader v{} is available", release.version),
+                    &format!(
+                        "Installed: v{}. Download it from the tray menu or the uploader window.",
+                        update::CURRENT_VERSION
+                    ),
+                );
+                let version = release.version.clone();
+                state.update(|settings| settings.notified_uploader_version = Some(version));
+            }
+        }
+        Ok(_) => {}
+        Err(error) => emit_activity(
+            app,
+            "",
+            None,
+            "error",
+            format!("Uploader update check: {error}"),
+            None,
+        ),
+    }
+
+    match &updates.addon {
+        Ok(release) => {
+            let outdated = outdated_clients(&settings, release);
+            if !outdated.is_empty() {
+                news = true;
+                let message = format!(
+                    "ForeverCollect v{} is available (outdated in: {}).",
+                    release.version,
+                    outdated.join(", ")
+                );
+                if by_hand || announced.insert(format!("addon {}", release.version)) {
+                    emit_activity(app, "", None, "update", message, None);
+                }
+                if by_hand || settings.notified_addon_version.as_ref() != Some(&release.version) {
+                    notify(
+                        app,
+                        &format!("ForeverCollect v{} is available", release.version),
+                        &format!(
+                            "Outdated in: {}. Install it in the ForeverDB Uploader.",
                             outdated.join(", ")
                         ),
-                        None,
                     );
+                    let version = release.version.clone();
+                    state.update(|settings| settings.notified_addon_version = Some(version));
                 }
             }
-            Err(error) => emit_activity(
-                &app,
-                "",
-                None,
-                "error",
-                format!("Addon update check: {error}"),
-                None,
-            ),
         }
+        Err(error) => emit_activity(
+            app,
+            "",
+            None,
+            "error",
+            format!("Addon update check: {error}"),
+            None,
+        ),
+    }
+
+    if by_hand && !news {
+        let failed = updates.uploader.is_err() || updates.addon.is_err();
+        notify(
+            app,
+            if failed {
+                "Update check failed"
+            } else {
+                "No updates found"
+            },
+            &if failed {
+                "See the activity list in the uploader window.".to_string()
+            } else {
+                format!(
+                    "ForeverDB Uploader v{} and the installed ForeverCollect are up to date.",
+                    update::CURRENT_VERSION
+                )
+            },
+        );
+    }
+}
+
+/// Checks for new uploader and addon releases on start and every RELEASE_CHECK_INTERVAL.
+async fn watch_releases(app: AppHandle) {
+    let mut announced = HashSet::new();
+    loop {
+        let updates = check_updates(&app, true).await;
+        announce_updates(&app, &updates, false, &mut announced);
         tokio_sleep(RELEASE_CHECK_INTERVAL).await;
     }
 }
@@ -2238,17 +2398,130 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// Tray icon with "Show" and "Quit"; a left click shows the window as well.
+/// The update entries of the tray menu, rewritten after every release check.
+struct TrayMenu {
+    uploader: MenuItem<tauri::Wry>,
+    addon: MenuItem<tauri::Wry>,
+}
+
+/// Texts of the tray's update entries and whether they can be clicked (only an
+/// available update leads somewhere).
+fn tray_texts(
+    uploader: Option<&Result<UploaderRelease, String>>,
+    addon: Option<&Result<AddonRelease, String>>,
+    outdated: bool,
+) -> ((String, bool), (String, bool)) {
+    let current = update::CURRENT_VERSION;
+    let uploader = match uploader {
+        Some(Ok(release)) if release.is_update() => (
+            format!("Uploader v{} available – download …", release.version),
+            true,
+        ),
+        Some(Ok(_)) => (format!("Uploader v{current} – up to date"), false),
+        Some(Err(_)) => (format!("Uploader v{current} – update check failed"), false),
+        None => (format!("Uploader v{current}"), false),
+    };
+    let addon = match addon {
+        Some(Ok(release)) if outdated => (
+            format!("ForeverCollect v{} available – install …", release.version),
+            true,
+        ),
+        Some(Ok(release)) => (
+            format!("ForeverCollect v{} – up to date", release.version),
+            false,
+        ),
+        Some(Err(_)) => ("ForeverCollect – update check failed".to_string(), false),
+        None => ("ForeverCollect – not checked yet".to_string(), false),
+    };
+    (uploader, addon)
+}
+
+/// Shows the cached release checks in the tray menu.
+fn refresh_tray(app: &AppHandle) {
+    let Some(menu) = app.try_state::<TrayMenu>() else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let uploader = state
+        .uploader_release
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|cache| cache.result);
+    let addon = state
+        .release
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|cache| cache.result);
+    let outdated = addon
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .is_some_and(|release| !outdated_clients(&state.snapshot(), release).is_empty());
+    let ((uploader_text, uploader_enabled), (addon_text, addon_enabled)) =
+        tray_texts(uploader.as_ref(), addon.as_ref(), outdated);
+    let _ = menu.uploader.set_text(uploader_text);
+    let _ = menu.uploader.set_enabled(uploader_enabled);
+    let _ = menu.addon.set_text(addon_text);
+    let _ = menu.addon.set_enabled(addon_enabled);
+}
+
+/// Tray icon with "Show", the update state of uploader and addon, "Check for updates" and
+/// "Quit"; a left click shows the window as well.
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let ((uploader_text, _), (addon_text, _)) = tray_texts(None, None, false);
     let show = MenuItem::with_id(app, "show", "Show ForeverDB Uploader", true, None::<&str>)?;
+    let uploader = MenuItem::with_id(app, "uploader_update", uploader_text, false, None::<&str>)?;
+    let addon = MenuItem::with_id(app, "addon_update", addon_text, false, None::<&str>)?;
+    let check = MenuItem::with_id(
+        app,
+        "check_updates",
+        "Check for updates",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show,
+            &PredefinedMenuItem::separator(app)?,
+            &uploader,
+            &addon,
+            &check,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+    app.manage(TrayMenu { uploader, addon });
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("ForeverDB Uploader")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
+            "uploader_update" => {
+                let state = app.state::<AppState>();
+                let url = state
+                    .uploader_release
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|cache| cache.result.as_ref().ok())
+                    .map(|release| release.html_url.clone());
+                if let Some(url) = url {
+                    let _ = app.opener().open_url(url, None::<&str>);
+                }
+            }
+            // The addon is installed per client, which the window offers.
+            "addon_update" => show_main_window(app),
+            "check_updates" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let updates = check_updates(&app, true).await;
+                    announce_updates(&app, &updates, true, &mut HashSet::new());
+                });
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -2282,6 +2555,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir().ok();
             let data_dir = app.path().app_data_dir().ok();
@@ -2329,6 +2603,7 @@ pub fn run() {
             set_autostart,
             link_account,
             check_addon_update,
+            check_uploader_update,
             install_addon
         ])
         .run(tauri::generate_context!())
@@ -2882,6 +3157,46 @@ mod tests {
         assert!(settings.last_upload_at.contains_key("/wow/WTF/Account/1#1"));
         assert!(!settings.last_upload_at.contains_key("/wow/WTF/Account/2#1"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tray_entries_lead_somewhere_only_for_updates() {
+        let newer = UploaderRelease {
+            version: "999.0.0".into(),
+            published_at: String::new(),
+            html_url: String::new(),
+        };
+        let current = UploaderRelease {
+            version: update::CURRENT_VERSION.into(),
+            ..newer.clone()
+        };
+        let addon = AddonRelease {
+            version: "0.6".into(),
+            name: String::new(),
+            notes: String::new(),
+            published_at: String::new(),
+            html_url: String::new(),
+            asset_name: String::new(),
+            asset_size: 0,
+            asset_url: String::new(),
+        };
+
+        let ((uploader, uploader_enabled), (addon_text, addon_enabled)) =
+            tray_texts(Some(&Ok(newer)), Some(&Ok(addon.clone())), true);
+        assert_eq!(uploader, "Uploader v999.0.0 available – download …");
+        assert!(uploader_enabled);
+        assert_eq!(addon_text, "ForeverCollect v0.6 available – install …");
+        assert!(addon_enabled);
+
+        let ((uploader, uploader_enabled), (addon_text, addon_enabled)) =
+            tray_texts(Some(&Ok(current)), Some(&Ok(addon)), false);
+        assert!(uploader.ends_with("up to date") && !uploader_enabled);
+        assert_eq!(addon_text, "ForeverCollect v0.6 – up to date");
+        assert!(!addon_enabled);
+
+        let ((uploader, _), (addon_text, _)) = tray_texts(Some(&Err("x".into())), None, false);
+        assert!(uploader.ends_with("update check failed"));
+        assert_eq!(addon_text, "ForeverCollect – not checked yet");
     }
 
     #[test]

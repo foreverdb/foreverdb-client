@@ -19,7 +19,7 @@ The window follows the order in which things have to happen:
    - pick a whole WoW installation (the "World of Warcraft" folder) or its `_classic_beta_` or `_classic_era_` folder with the native folder dialog.
 
    Your choice is stored in `settings.json`.
-2. **ForeverCollect addon.** Shows the installed addon version next to the latest release and installs or updates it with one click (see "Addon updates").
+2. **ForeverCollect addon.** Shows the installed addon version next to the latest release and installs or updates it with one click (see "Updates").
 3. **Upload.** Shows the state of `ForeverCollect.lua` for every WoW account of the client (`WTF/Account/<account>`, several when several people or licences play on one installation) and warns about the situations below, then offers "Upload now" per account for a manual upload next to the automatic one:
    - WoW is running.
    - The game has not saved for a long time.
@@ -53,7 +53,7 @@ WoW writes the SavedVariables only on logout, on `/reload` and on exit. The app 
 
 ## Tray and autostart
 
-**Tray:** The uploader shows a tray icon; a left click or "Show ForeverDB Uploader" in its menu opens the window, "Quit" ends the app. With "Closing the window keeps the uploader running in the tray" (on by default) closing the window only hides it, and the watcher keeps uploading. Switched off, closing the window quits. On GNOME the tray icon needs the AppIndicator extension; without it, starting the app again brings the window back.
+**Tray:** The uploader shows a tray icon; a left click or "Show ForeverDB Uploader" in its menu opens the window, "Quit" ends the app. The menu also shows the update state of the uploader and the addon (see "Updates") and offers "Check for updates". With "Closing the window keeps the uploader running in the tray" (on by default) closing the window only hides it, and the watcher keeps uploading. Switched off, closing the window quits. On GNOME the tray icon needs the AppIndicator extension; without it, starting the app again brings the window back.
 
 **Autostart:** "Start with the system, minimized to the tray" (off by default) creates the system's autostart entry, which starts the app with `--minimized`: no window, only the tray icon and the watcher. The switch reads the entry itself, so removing it outside the app shows up as off.
 - Linux: `~/.config/autostart/ForeverDB Uploader.desktop`
@@ -71,18 +71,22 @@ The uploader converts the SavedVariables to JSON itself and uploads only that (`
 
 **What the archive keeps:** The archive keeps the raw `.lua`, not the JSON. Since the server no longer stores the original file, it is the only remaining source for reproducing a parser bug. The file name carries the import ID, so it can still be matched to `import_jobs.id`.
 
-## Addon updates
+## Updates
 
-**When it checks:** On start and every 6 hours, the uploader fetches the latest release of the addon repository (`foreverdb/forevercollect-addon`, overridable with `FOREVERDB_ADDON_REPO`). It compares that release with the `## Version:` of the installed `Interface/AddOns/ForeverCollect/ForeverCollect.toc`.
+**Uploader:** On start and every 6 hours, the uploader also fetches the releases of its own repository (`foreverdb/foreverdb-client`, overridable with `FOREVERDB_UPLOADER_REPO`) and compares the highest version, pre-releases included, with its own. It does not install itself: a newer version shows a notice with a download link in the window, and the tray entry "Uploader vX available – download …" opens the release page. The footer of the window shows the running version and checks by hand.
 
-**Installing or updating:** If the release is newer, or the addon is missing, the addon card offers "Update" or "Install":
+**Notifications:** A new uploader or addon release (for an addon that is installed and older) is shown once per version as a desktop notification, also while the window is hidden; the versions already notified are kept in `settings.json`. "Check for updates" in the tray reports its result as a notification as well, including that nothing is new. On Linux the notifications need a notification service (every common desktop has one).
+
+**Addon, when it checks:** On start and every 6 hours, the uploader fetches the latest release of the addon repository (`foreverdb/forevercollect-addon`, overridable with `FOREVERDB_ADDON_REPO`). It compares that release with the `## Version:` of the installed `Interface/AddOns/ForeverCollect/ForeverCollect.toc`.
+
+**Installing or updating:** If the release is newer, or the addon is missing, the addon card offers "Update" or "Install" (the tray entry "ForeverCollect vX available – install …" opens the window there):
 1. The release zip is downloaded.
 2. It is verified: it may contain only `ForeverCollect/`, and the TOC version must match the release.
 3. The addon folder is replaced atomically.
 
 While the game is running, the new version takes effect on the next login or `/reload`.
 
-The addon repository is public, so the check and the download need no GitHub token. GitHub allows 60 unauthenticated API requests per hour and IP, far more than the check every 6 hours uses.
+Both repositories are public, so the checks and the download need no GitHub token. GitHub allows 60 unauthenticated API requests per hour and IP, far more than the checks every 6 hours use.
 
 ## User ID
 

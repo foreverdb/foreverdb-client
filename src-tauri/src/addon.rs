@@ -73,15 +73,15 @@ pub struct AddonRelease {
 }
 
 #[derive(Deserialize)]
-struct GithubRelease {
-    tag_name: String,
+pub(crate) struct GithubRelease {
+    pub(crate) tag_name: String,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
-    published_at: Option<String>,
-    html_url: String,
+    pub(crate) published_at: Option<String>,
+    pub(crate) html_url: String,
     #[serde(default)]
     assets: Vec<GithubAsset>,
 }
@@ -93,7 +93,7 @@ struct GithubAsset {
     url: String,
 }
 
-/// The addon repository is public, so GitHub is asked without a token.
+/// The repositories are public, so GitHub is asked without a token.
 fn github_client() -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("X-GitHub-Api-Version", "2022-11-28".parse().unwrap());
@@ -116,11 +116,9 @@ fn explain_status(status: reqwest::StatusCode, what: &str) -> String {
     }
 }
 
-pub async fn fetch_latest_release() -> Result<AddonRelease, String> {
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        repository()
-    );
+/// The newest published release of a repository (drafts and pre-releases do not count).
+pub(crate) async fn fetch_github_latest(repo: &str, what: &str) -> Result<GithubRelease, String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let response = github_client()?
         .get(&url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
@@ -128,12 +126,38 @@ pub async fn fetch_latest_release() -> Result<AddonRelease, String> {
         .await
         .map_err(|e| format!("Release check failed: {e}"))?;
     if !response.status().is_success() {
-        return Err(explain_status(response.status(), "the latest release"));
+        return Err(explain_status(response.status(), what));
     }
-    let release: GithubRelease = response
+    response
         .json()
         .await
-        .map_err(|e| format!("Could not read the release response: {e}"))?;
+        .map_err(|e| format!("Could not read the release response: {e}"))
+}
+
+/// The newest releases of a repository, including pre-releases (drafts are not visible
+/// without a token).
+pub(crate) async fn fetch_github_releases(
+    repo: &str,
+    what: &str,
+) -> Result<Vec<GithubRelease>, String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=20");
+    let response = github_client()?
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Release check failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(explain_status(response.status(), what));
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| format!("Could not read the release response: {e}"))
+}
+
+pub async fn fetch_latest_release() -> Result<AddonRelease, String> {
+    let release = fetch_github_latest(&repository(), "the latest release").await?;
     let asset = release
         .assets
         .iter()
