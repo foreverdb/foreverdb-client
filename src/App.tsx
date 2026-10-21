@@ -625,7 +625,7 @@ function App() {
         <div className="update-banner">
           <strong>ForeverDB Uploader v{uploaderUpdate.latest.version} is available</strong>
           <span>Installed: v{uploaderUpdate.current}</span>
-          <button className="link" onClick={() => void openUrl(uploaderUpdate.latest.html_url)}>Download</button>
+          <SiteLink path="/info/uploader">Download</SiteLink>
         </div>
       )}
 

@@ -29,7 +29,7 @@
     "targets": "all",
     "category": "Utility",
     "publisher": "Alex Bangert",
-    "homepage": "https://github.com/foreverdb/foreverdb",
+    "homepage": "https://www.foreverdb.app",
     "license": "MIT",
     "licenseFile": "../LICENSE",
     "shortDescription": "Uploads ForeverCollect SavedVariables from World of Warcraft",
