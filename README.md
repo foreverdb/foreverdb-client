@@ -1,6 +1,6 @@
 # ForeverDB Uploader
 
-Desktop uploader for the ForeverCollect SavedVariables of **World of Warcraft: Forever** and **Classic Hardcore**. Supported are the Forever client (the `_classic_beta_` folder, product `wow_classic_beta`) and the Classic Era client (the `_classic_era_` folder, product `wow_classic_era`), which also runs Hardcore; the server tells them apart by season. Retail and the other Classic versions are not supported yet. Their folders are ignored during detection and rejected when chosen by hand.
+Desktop uploader for the ForeverCollect SavedVariables of **World of Warcraft: Forever** and **Classic Hardcore**. Supported are the Forever Beta client (the `_classic_beta_` folder, product `wow_classic_beta`) and the Classic Era client (the `_classic_era_` folder, product `wow_classic_era`), which also runs Hardcore; the server tells them apart by season. Retail and the other Classic versions are not supported yet. Their folders are ignored during detection and rejected when chosen by hand.
 
 Development: `pnpm tauri dev`. Build: `pnpm tauri build`.
 

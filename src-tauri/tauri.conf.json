@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "ForeverDB Uploader",
-        "width": 900,
-        "height": 780,
+        "width": 1180,
+        "height": 860,
         "minWidth": 520,
         "minHeight": 650,
         "visible": false

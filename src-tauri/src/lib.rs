@@ -30,7 +30,7 @@ const DEFAULT_TARGET_URL: &str = "https://upload.foreverdb.app/imports/foreverco
 /// The website's API; the uploader only calls it to link itself to an account.
 const DEFAULT_API_URL: &str = "https://api.foreverdb.app";
 
-/// The products the client works with: Forever runs in the "_classic_beta_" folder,
+/// The products the client works with: Forever Beta runs in the "_classic_beta_" folder,
 /// Classic Era and Hardcore share the "_classic_era_" folder (the season tells them
 /// apart on the server). Retail and the other Classic versions are not supported yet.
 const SUPPORTED_PRODUCTS: &[&str] = &["wow_classic_beta", "wow_classic_era"];
@@ -41,7 +41,7 @@ fn is_supported(def: &ClientDef) -> bool {
 
 fn unsupported_message(def: &ClientDef) -> String {
     format!(
-        "'{}' is a {} client. Only Forever and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
+        "'{}' is a {} client. Only Forever Beta and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
         def.id, def.label
     )
 }
@@ -50,7 +50,7 @@ fn unsupported_message(def: &ClientDef) -> String {
 /// other flavours stay listed so a rejection can name what the user picked.
 fn product_label(product: &str) -> String {
     match product {
-        "wow_classic_beta" => "Forever",
+        "wow_classic_beta" => "Forever Beta",
         "wow_classic_era" => "Classic Era & Hardcore",
         "wow_classic_era_ptr" => "Classic Era PTR",
         "wow_classic" => "Classic",
@@ -96,6 +96,8 @@ struct AccountStatus {
     /// Unix time the SavedVariables file was last written (WoW writes it only on logout,
     /// exit or /reload).
     saved_at: Option<u64>,
+    /// Unix time of the last successful upload of this account.
+    uploaded_at: Option<u64>,
     /// The ForeverDB account this user's uploader ID was linked to, for display.
     linked_account: Option<String>,
 }
@@ -555,11 +557,14 @@ fn candidate_wow_dirs(settings: &Settings) -> Vec<PathBuf> {
     candidates
 }
 
-/// Where the launcher installs on this platform: Wine prefixes (Faugus, Lutris,
-/// plain Wine, Bottles) and the macOS default.
+/// Where the launcher installs on this platform: the Windows and macOS defaults, then
+/// Wine prefixes (Faugus, Lutris, plain Wine, Bottles).
 #[cfg(not(target_os = "windows"))]
 fn system_wow_dirs() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
+    let mut candidates = vec![
+        PathBuf::from("C:/Program Files (x86)/World of Warcraft"),
+        PathBuf::from("/Applications/World of Warcraft"),
+    ];
     let program_files = "drive_c/Program Files (x86)/World of Warcraft";
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         for prefix in [
@@ -583,8 +588,6 @@ fn system_wow_dirs() -> Vec<PathBuf> {
             }
         }
     }
-    candidates.push(PathBuf::from("C:/Program Files (x86)/World of Warcraft"));
-    candidates.push(PathBuf::from("/Applications/World of Warcraft"));
     candidates
 }
 
@@ -1125,6 +1128,7 @@ fn account_status(settings: &Settings, account: &AccountDir) -> AccountStatus {
         file_has_data: source.is_some(),
         from_backup: source.as_ref().is_some_and(|source| source.from_backup),
         saved_at: modified_at(&main_path).or_else(|| modified_at(&backup_path(&main_path))),
+        uploaded_at: settings.last_upload_at.get(&account.key()).copied(),
         file_path: source
             .map(|source| source.path)
             .unwrap_or(main_path)
@@ -1283,7 +1287,7 @@ fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, Strin
     let supported: Vec<ClientDef> = flavours.into_iter().filter(is_supported).collect();
     if supported.is_empty() {
         return Err(format!(
-            "'{}' contains no supported client (_classic_beta_ or _classic_era_). Only Forever and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
+            "'{}' contains no supported client (_classic_beta_ or _classic_era_). Only Forever Beta and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
             path.display()
         ));
     }
@@ -2666,7 +2670,7 @@ mod tests {
         let forever = client_from_dir(&root.join("_classic_beta_")).unwrap();
         assert_eq!(
             (forever.label.as_str(), forever.process.as_str()),
-            ("Forever", "WowB.exe")
+            ("Forever Beta", "WowB.exe")
         );
         let retail = client_from_dir(&root.join("_retail_")).unwrap();
         assert_eq!(
@@ -2750,7 +2754,7 @@ mod tests {
         let beta = fake_flavour(&root, "_classic_beta_", "wow_classic_beta", "WowB.exe");
         let retail = fake_flavour(&root, "_retail_", "wow", "Wow.exe");
 
-        // a Forever or Classic Era / Hardcore folder becomes an extra client
+        // a Forever Beta or Classic Era / Hardcore folder becomes an extra client
         for dir in [&beta, &era] {
             let mut settings = Settings::default();
             register_folder(&mut settings, dir).unwrap();
@@ -2764,7 +2768,7 @@ mod tests {
         // other flavours are rejected
         let mut settings = Settings::default();
         let error = register_folder(&mut settings, &retail).unwrap_err();
-        assert!(error.contains("Only Forever and Classic Era"), "{error}");
+        assert!(error.contains("Only Forever Beta and Classic Era"), "{error}");
         assert!(settings.extra_clients.is_empty());
 
         // an installation without launcher file activates its supported folders
@@ -2914,6 +2918,7 @@ mod tests {
             file_has_data: false,
             from_backup: false,
             saved_at: None,
+            uploaded_at: None,
             linked_account: None,
         };
         let client = ClientStatus {
