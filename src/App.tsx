@@ -20,6 +20,8 @@ type AccountStatus = {
   saved_at: number | null;
   /** Last successful upload of this account. */
   uploaded_at: number | null;
+  /** Uploader ID (X-ForeverDB-User) of the Battle.net account; the profile lists links by it. */
+  uploader_id: string | null;
   linked_account: string | null;
 };
 
@@ -38,10 +40,12 @@ type ClientStatus = {
 };
 
 const UNSAVED_WARNING_HOURS = 2;
+/** How long the notice of a completed import stays before it collapses; failures stay. */
+const IMPORT_NOTICE_SECONDS = 10;
 // English texts with a 24-hour clock and day-first dates.
 const LOCALE = "en-GB";
 const SITE_URL = "https://www.foreverdb.app/en";
-const FOREVER_PRODUCT = "wow_classic_beta";
+const FOREVER_PRODUCTS = ["wowf", "wow_classic_beta"];
 
 function clock(unixSeconds: number) {
   return new Date(unixSeconds * 1000).toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" });
@@ -190,8 +194,12 @@ function App() {
   const [pairingCodes, setPairingCodes] = useState<Record<string, string>>({});
   const [linking, setLinking] = useState<string | null>(null);
   const [linkErrors, setLinkErrors] = useState<Record<string, string>>({});
+  // Linked accounts whose pairing form is open to link again, per user (bnet_id).
+  const [relink, setRelink] = useState<Record<string, boolean>>({});
   // Account cards whose characters are shown, by account key.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // The activity log starts collapsed; the user opens it.
+  const [logOpen, setLogOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -287,6 +295,17 @@ function App() {
     }
   }
 
+  // A completed import's notice collapses after a while; the badge keeps the upload time.
+  const importCompleted = result !== null && importStatus?.import_id === result.import_id && importStatus.status === "completed";
+  useEffect(() => {
+    if (!importCompleted) return;
+    const timer = window.setTimeout(() => {
+      setResult(null);
+      setImportStatus(null);
+    }, IMPORT_NOTICE_SECONDS * 1000);
+    return () => window.clearTimeout(timer);
+  }, [importCompleted]);
+
   // The Rust watcher reports what it does (game closed, upload started, result).
   useEffect(() => {
     let active = true;
@@ -339,7 +358,7 @@ function App() {
   }
 
   async function chooseFolder() {
-    const picked = await open({ directory: true, multiple: false, title: "Choose your WoW installation (\"World of Warcraft\") or a client folder (_classic_beta_ or _classic_era_)" });
+    const picked = await open({ directory: true, multiple: false, title: "Choose your WoW installation (\"World of Warcraft\") or a client folder (_forever_, _classic_beta_ or _classic_era_)" });
     if (typeof picked === "string") await addClient(picked);
   }
 
@@ -367,6 +386,7 @@ function App() {
     try {
       await invoke<string>("link_account", { code: pairingCodes[user] ?? "", user });
       setPairingCodes((codes) => ({ ...codes, [user]: "" }));
+      setRelink((current) => ({ ...current, [user]: false }));
       await refresh();
     } catch (message) {
       setLinkErrors((errors) => ({ ...errors, [user]: String(message) }));
@@ -416,6 +436,9 @@ function App() {
 
   const clients = installation?.clients ?? [];
   const entries = clients.flatMap((client) => client.accounts.map((account) => ({ client, account })));
+  // Licences of one Battle.net account share the uploader ID and are linked together.
+  const groups = new Map<string, typeof entries>();
+  for (const entry of entries) groups.set(entry.account.bnet_id, [...(groups.get(entry.account.bnet_id) ?? []), entry]);
   const accountNames = new Map(entries.map(({ account }) => [account.key, account.name]));
   const readyCount = entries.filter(({ account }) => account.file_has_data).length;
   // Name the client at each account only when accounts come from more than one client.
@@ -426,8 +449,6 @@ function App() {
     const badge = accountBadge(account);
     const characters = account.characters.map(splitCharacter);
     const open = expanded[account.key] ?? false;
-    const user = account.bnet_id;
-    const code = pairingCodes[user] ?? "";
     const neverWritten = !account.file_exists && account.uploaded_at === null;
     return (
       <article key={account.key} className="account-card">
@@ -500,52 +521,88 @@ function App() {
           </div>
         )}
 
-        {account.linked_account ? (
-          <div className="account-foot linked">
-            <Icon path={ICONS.checkCircle} className="success-icon" />
-            <span className="linked-text">
-              Linked to <strong>{account.linked_account}</strong> · <SiteLink path="/profile#characters">Choose visible characters in your profile</SiteLink>
-            </span>
-            <SiteLink path="/profile#uploader" className="link quiet">Unlink</SiteLink>
-          </div>
-        ) : (
-          <form className="account-foot pairing" onSubmit={(event) => void linkAccount(event, user)}>
-            <div className="pairing-title">
-              <Icon path={ICONS.link} className="primary-icon" />
-              <strong>Link this account to ForeverDB</strong>
-              <span>— connects its uploads with your ForeverDB profile</span>
-            </div>
-            <ol className="steps">
-              <li>
-                <span className="step-title"><span className="step-number">1</span>Open your profile</span>
-                <SiteLink path="/profile#uploader" className="tint-button">Profile › Uploader</SiteLink>
-              </li>
-              <li>
-                <span className="step-title"><span className="step-number">2</span>Create a pairing code</span>
-                <small>Sign in on ForeverDB and copy the code shown there.</small>
-              </li>
-              <li className="grow">
-                <span className="step-title"><span className="step-number">3</span>Paste it here</span>
-                <div className="code-row">
-                  <input
-                    value={code}
-                    onChange={(event) => setPairingCodes((codes) => ({ ...codes, [user]: event.target.value }))}
-                    placeholder="XXXX-XXXX"
-                    aria-label={`Pairing code for ${account.name}`}
-                    autoComplete="off"
-                    spellCheck={false}
-                    disabled={linking !== null}
-                  />
-                  <button className="primary" type="submit" disabled={linking !== null || code.trim() === ""}>
-                    {linking === user ? "Linking …" : "Link"}
-                  </button>
-                </div>
-                {linkErrors[user] && <small className="alert">{linkErrors[user]}</small>}
-              </li>
-            </ol>
-          </form>
-        )}
       </article>
+    );
+  }
+
+  /** Steps to redeem a pairing code from the profile for the uploader ID of `user` (bnet_id). */
+  function pairingForm(user: string, uploaderTag: ReactNode) {
+    const code = pairingCodes[user] ?? "";
+    return (
+      <form className="account-foot pairing" onSubmit={(event) => void linkAccount(event, user)}>
+        <div className="pairing-title">
+          <Icon path={ICONS.link} className="primary-icon" />
+          <strong>Link this WoW account to ForeverDB</strong>
+          <span>— applies to all its licences (#1, #2 …) in every client{uploaderTag}</span>
+        </div>
+        <ol className="steps">
+          <li>
+            <span className="step-title"><span className="step-number">1</span>Open your profile</span>
+            <SiteLink path="/profile#uploader" className="tint-button">Profile › Uploader</SiteLink>
+          </li>
+          <li>
+            <span className="step-title"><span className="step-number">2</span>Create a pairing code</span>
+            <small>Sign in on ForeverDB and copy the code shown there.</small>
+          </li>
+          <li className="grow">
+            <span className="step-title"><span className="step-number">3</span>Paste it here</span>
+            <div className="code-row">
+              <input
+                value={code}
+                onChange={(event) => setPairingCodes((codes) => ({ ...codes, [user]: event.target.value }))}
+                placeholder="XXXX-XXXX"
+                aria-label={`Pairing code for WoW account ${user}`}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={linking !== null}
+              />
+              <button className="primary" type="submit" disabled={linking !== null || code.trim() === ""}>
+                {linking === user ? "Linking …" : "Link"}
+              </button>
+            </div>
+            {linkErrors[user] && <small className="alert">{linkErrors[user]}</small>}
+          </li>
+        </ol>
+      </form>
+    );
+  }
+
+  /** One Battle.net account: its licence folders of all clients share one uploader ID, so it is linked once. */
+  function wowAccountGroup(user: string, members: { client: ClientStatus; account: AccountStatus }[]) {
+    const linked = members[0].account.linked_account;
+    const relinking = relink[user] ?? false;
+    const uploaderId = members[0].account.uploader_id;
+    const uploaderTag = uploaderId && <> · uploader <code className="mono-label">{uploaderId.slice(0, 8)}</code></>;
+    const licences = members.length;
+    const clientCount = new Set(members.map(({ client }) => client.id)).size;
+    return (
+      <section key={user} className="account-card wow-account">
+        <div className="wow-account-head">
+          <span className="eyebrow">WoW account</span>
+          <span className="mono-label">{user}</span>
+          <span className="account-client">
+            {licences} {licences === 1 ? "licence" : "licences"}{clientCount > 1 ? ` in ${clientCount} clients` : ""}
+          </span>
+        </div>
+        <div className="wow-account-licences">{members.map(({ client, account }) => accountCard(client, account))}</div>
+        {linked ? (
+          <>
+            <div className="account-foot linked">
+              <Icon path={ICONS.checkCircle} className="success-icon" />
+              <span className="linked-text">
+                Linked to <strong>{linked}</strong>{uploaderTag} · <SiteLink path="/profile#characters">Choose visible characters in your profile</SiteLink>
+              </span>
+              <button className="link toggle" aria-expanded={relinking} onClick={() => setRelink((current) => ({ ...current, [user]: !relinking }))}>
+                Link again<Icon path={ICONS.caret} size={12} className={relinking ? "flipped" : ""} />
+              </button>
+              <SiteLink path="/profile#uploader" className="link quiet">Unlink</SiteLink>
+            </div>
+            {relinking && pairingForm(user, uploaderTag)}
+          </>
+        ) : (
+          pairingForm(user, uploaderTag)
+        )}
+      </section>
     );
   }
 
@@ -555,7 +612,7 @@ function App() {
     return (
       <article key={client.id} className="client-card">
         <div className="client-head">
-          <span className={`client-icon ${client.product === FOREVER_PRODUCT ? "forever" : ""}`}><Icon path={ICONS.shield} /></span>
+          <span className={`client-icon ${FOREVER_PRODUCTS.includes(client.product) ? "forever" : ""}`}><Icon path={ICONS.shield} /></span>
           <div>
             <strong>{client.label}</strong>
             <span className="mono-label small">{client.version ?? "Version unknown"}</span>
@@ -633,7 +690,7 @@ function App() {
         <main className="main">
           <section className="hero">
             <div>
-              <p className="eyebrow">ForeverCollect · {entries.length} {entries.length === 1 ? "account" : "accounts"}</p>
+              <p className="eyebrow">ForeverCollect · {groups.size} {groups.size === 1 ? "WoW account" : "WoW accounts"}</p>
               <h1>Your Game Data</h1>
               <p className="lead">Every time WoW writes its data — logout, /reload or exit — the uploader sends it to ForeverDB and keeps a copy in its archive.</p>
             </div>
@@ -658,19 +715,25 @@ function App() {
             <div className="account-card empty">
               <p className="note">
                 {clients.length === 0
-                  ? "No supported client found. Add its _classic_beta_ or _classic_era_ folder or the WoW installation that contains it."
+                  ? "No supported client found. Add its _forever_, _classic_beta_ or _classic_era_ folder or the WoW installation that contains it."
                   : "No account folder found yet – log in to WoW once to create it."}
               </p>
             </div>
           )}
 
-          {entries.length > 0 && <div className="accounts">{entries.map(({ client, account }) => accountCard(client, account))}</div>}
+          {entries.length > 0 && <div className="accounts">{[...groups].map(([user, members]) => wowAccountGroup(user, members))}</div>}
 
           {error && <div className="notice error"><strong>Something went wrong</strong><span>{error}</span></div>}
 
-          {log.length > 0 && (
-            <section className="recent">
-              <h2 className="section-label">Recent uploads</h2>
+          <section className="recent">
+            <div className="section-row">
+              <h2 className="section-label">Recent activity{log.length > 0 && ` · ${log.length}`}</h2>
+              <button className="link toggle" aria-expanded={logOpen} onClick={() => setLogOpen((open) => !open)}>
+                {logOpen ? "Hide" : "Show"}<Icon path={ICONS.caret} size={12} className={logOpen ? "flipped" : ""} />
+              </button>
+            </div>
+            {logOpen && log.length === 0 && <p className="note">No recent activity.</p>}
+            {logOpen && log.length > 0 && (
               <ul>
                 {log.map((entry) => {
                   const name = entry.account ? accountNames.get(entry.account) : undefined;
@@ -684,8 +747,8 @@ function App() {
                   );
                 })}
               </ul>
-            </section>
-          )}
+            )}
+          </section>
         </main>
 
         <aside className="sidebar">
@@ -727,7 +790,7 @@ function App() {
         <div className="backdrop" onClick={() => setDialog(null)}>
           <div className="dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
             <h2>Add client</h2>
-            <p className="note">Supported clients of the installations found, or choose a WoW installation ("World of Warcraft") or its _classic_beta_ or _classic_era_ folder yourself.</p>
+            <p className="note">Supported clients of the installations found, or choose a WoW installation ("World of Warcraft") or its _forever_, _classic_beta_ or _classic_era_ folder yourself.</p>
             {dialog.candidates.length === 0 && <p className="note">No further supported clients found in the known installations.</p>}
             <ul className="candidates">
               {dialog.candidates.map((candidate) => (

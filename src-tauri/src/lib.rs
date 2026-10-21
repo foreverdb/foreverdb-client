@@ -23,17 +23,17 @@ use update::UploaderRelease;
 
 // The user only picks a WoW client; installation directory, account, file and
 // upload target are derived. A client is a flavour folder such as
-// "_classic_beta_" or "_classic_era_": its ".flavor.info" names the product, the "Wow*.exe" in it
+// "_forever_", "_classic_beta_" or "_classic_era_": its ".flavor.info" names the product, the "Wow*.exe" in it
 // the process to watch, and the launcher's ".build.info" the installed version.
 
 const DEFAULT_TARGET_URL: &str = "https://upload.foreverdb.app/imports/forevercollect";
 /// The website's API; the uploader only calls it to link itself to an account.
 const DEFAULT_API_URL: &str = "https://api.foreverdb.app";
 
-/// The products the client works with: Forever Beta runs in the "_classic_beta_" folder,
-/// Classic Era and Hardcore share the "_classic_era_" folder (the season tells them
+/// The products the client works with: Forever runs in the "_forever_" folder, Forever
+/// Beta in the "_classic_beta_" folder, Classic Era and Hardcore share the "_classic_era_" folder (the season tells them
 /// apart on the server). Retail and the other Classic versions are not supported yet.
-const SUPPORTED_PRODUCTS: &[&str] = &["wow_classic_beta", "wow_classic_era"];
+const SUPPORTED_PRODUCTS: &[&str] = &["wowf", "wow_classic_beta", "wow_classic_era"];
 
 fn is_supported(def: &ClientDef) -> bool {
     SUPPORTED_PRODUCTS.contains(&def.product.as_str())
@@ -41,7 +41,7 @@ fn is_supported(def: &ClientDef) -> bool {
 
 fn unsupported_message(def: &ClientDef) -> String {
     format!(
-        "'{}' is a {} client. Only Forever Beta and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
+        "'{}' is a {} client. Only Forever, Forever Beta and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
         def.id, def.label
     )
 }
@@ -50,6 +50,7 @@ fn unsupported_message(def: &ClientDef) -> String {
 /// other flavours stay listed so a rejection can name what the user picked.
 fn product_label(product: &str) -> String {
     match product {
+        "wowf" => "Forever",
         "wow_classic_beta" => "Forever Beta",
         "wow_classic_era" => "Classic Era & Hardcore",
         "wow_classic_era_ptr" => "Classic Era PTR",
@@ -98,6 +99,9 @@ struct AccountStatus {
     saved_at: Option<u64>,
     /// Unix time of the last successful upload of this account.
     uploaded_at: Option<u64>,
+    /// The uploader ID of this user (`X-ForeverDB-User`), shared by all licences of the
+    /// Battle.net account in every client; the profile lists links by it.
+    uploader_id: Option<String>,
     /// The ForeverDB account this user's uploader ID was linked to, for display.
     linked_account: Option<String>,
 }
@@ -1119,6 +1123,7 @@ fn client_status(
 fn account_status(settings: &Settings, account: &AccountDir) -> AccountStatus {
     let main_path = account.file();
     let source = snapshot_source(&main_path);
+    let identity = settings.identities.get(&account.bnet_id);
     AccountStatus {
         key: account.key(),
         name: account.name.clone(),
@@ -1134,10 +1139,8 @@ fn account_status(settings: &Settings, account: &AccountDir) -> AccountStatus {
             .unwrap_or(main_path)
             .to_string_lossy()
             .into_owned(),
-        linked_account: settings
-            .identities
-            .get(&account.bnet_id)
-            .and_then(|identity| identity.linked_account.clone()),
+        uploader_id: identity.map(|identity| identity.user_id.clone()),
+        linked_account: identity.and_then(|identity| identity.linked_account.clone()),
     }
 }
 
@@ -1287,7 +1290,7 @@ fn register_folder(settings: &mut Settings, path: &Path) -> Result<String, Strin
     let supported: Vec<ClientDef> = flavours.into_iter().filter(is_supported).collect();
     if supported.is_empty() {
         return Err(format!(
-            "'{}' contains no supported client (_classic_beta_ or _classic_era_). Only Forever Beta and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
+            "'{}' contains no supported client (_forever_, _classic_beta_ or _classic_era_). Only Forever, Forever Beta and Classic Era / Hardcore are supported; Retail and the other Classic versions are not supported yet.",
             path.display()
         ));
     }
@@ -2752,10 +2755,11 @@ mod tests {
         let root = temp_dir("register");
         let era = fake_flavour(&root, "_classic_era_", "wow_classic_era", "WowClassic.exe");
         let beta = fake_flavour(&root, "_classic_beta_", "wow_classic_beta", "WowB.exe");
+        let forever = fake_flavour(&root, "_forever_", "wowf", "Wow.exe");
         let retail = fake_flavour(&root, "_retail_", "wow", "Wow.exe");
 
-        // a Forever Beta or Classic Era / Hardcore folder becomes an extra client
-        for dir in [&beta, &era] {
+        // a Forever, Forever Beta or Classic Era / Hardcore folder becomes an extra client
+        for dir in [&forever, &beta, &era] {
             let mut settings = Settings::default();
             register_folder(&mut settings, dir).unwrap();
             assert_eq!(
@@ -2768,7 +2772,7 @@ mod tests {
         // other flavours are rejected
         let mut settings = Settings::default();
         let error = register_folder(&mut settings, &retail).unwrap_err();
-        assert!(error.contains("Only Forever Beta and Classic Era"), "{error}");
+        assert!(error.contains("Only Forever, Forever Beta and Classic Era"), "{error}");
         assert!(settings.extra_clients.is_empty());
 
         // an installation without launcher file activates its supported folders
@@ -2782,7 +2786,8 @@ mod tests {
             settings.extra_clients,
             vec![
                 beta.to_string_lossy().into_owned(),
-                era.to_string_lossy().into_owned()
+                era.to_string_lossy().into_owned(),
+                forever.to_string_lossy().into_owned()
             ]
         );
 
@@ -2919,6 +2924,7 @@ mod tests {
             from_backup: false,
             saved_at: None,
             uploaded_at: None,
+            uploader_id: None,
             linked_account: None,
         };
         let client = ClientStatus {
@@ -2940,6 +2946,42 @@ mod tests {
             crash_at: None,
         };
         assert_eq!(users_of(&[client]), vec!["222", "111", "ALEX"]);
+    }
+
+    #[test]
+    fn licences_in_different_clients_share_one_identity() {
+        let root = temp_dir("licences");
+        let beta = fake_flavour(&root, "_classic_beta_", "wow_classic_beta", "WowB.exe");
+        let era = fake_flavour(&root, "_classic_era_", "wow_classic_era", "WowClassic.exe");
+        for (dir, name) in [(&beta, "112598966#1"), (&era, "112598966#2")] {
+            fs::create_dir_all(dir.join("WTF/Account").join(name).join("SavedVariables")).unwrap();
+        }
+        let status = |settings: &Settings| -> Vec<ClientStatus> {
+            [&beta, &era]
+                .iter()
+                .map(|dir| {
+                    let def = client_from_dir(dir).unwrap();
+                    client_status(settings, &def, None, false, None)
+                })
+                .collect()
+        };
+        let mut settings = Settings::default();
+        let users = users_of(&status(&settings));
+        assert_eq!(users, vec!["112598966"]);
+        assert!(ensure_identities(&mut settings, users.iter().map(String::as_str)));
+        settings.identities.get_mut("112598966").unwrap().linked_account = Some("Alex".into());
+
+        let accounts: Vec<AccountStatus> = status(&settings)
+            .into_iter()
+            .flat_map(|client| client.accounts)
+            .collect();
+        assert_eq!(accounts.len(), 2);
+        let user_id = settings.identities["112598966"].user_id.clone();
+        for account in &accounts {
+            assert_eq!(account.uploader_id.as_deref(), Some(user_id.as_str()));
+            assert_eq!(account.linked_account.as_deref(), Some("Alex"));
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
