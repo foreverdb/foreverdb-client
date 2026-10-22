@@ -16,6 +16,7 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 mod addon;
+mod combatlog;
 mod lua;
 mod update;
 use addon::AddonRelease;
@@ -196,6 +197,13 @@ struct Settings {
     notified_uploader_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notified_addon_version: Option<String>,
+    /// Adds the creatures that died during boss kills from the game's combat log to each
+    /// upload (see `combatlog`).
+    #[serde(default = "default_true")]
+    combat_log_encounters: bool,
+    /// Per combat log file, the byte offset read up to with the last successful upload.
+    #[serde(default)]
+    combat_log_offsets: HashMap<String, u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -307,6 +315,7 @@ fn users_of(clients: &[ClientStatus]) -> Vec<String> {
 struct SettingsView {
     auto_upload: bool,
     close_to_tray: bool,
+    combat_log_encounters: bool,
     /// Read from the system's autostart entry, not stored in settings.json.
     autostart: bool,
     extra_clients: Vec<String>,
@@ -319,6 +328,7 @@ impl Settings {
         SettingsView {
             auto_upload: self.auto_upload,
             close_to_tray: self.close_to_tray,
+            combat_log_encounters: self.combat_log_encounters,
             autostart: app.autolaunch().is_enabled().unwrap_or(false),
             extra_clients: self.extra_clients.clone(),
             extra_installations: self.extra_installations.clone(),
@@ -1478,14 +1488,26 @@ async fn upload_client(
     // The server only accepts JSON. If the conversion fails, the snapshot itself is
     // broken or too new: archive it, mark it as handled (otherwise the watcher retries
     // every few seconds) and leave the file in place.
-    let snapshot = match lua::parse_forever_collect(&content) {
+    let mut snapshot = match lua::parse_forever_collect(&content) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            let _ = archive_snapshot(&state.archive_dir, &label, None, &content);
+            let _ = archive_snapshot(&state.archive_dir, &label, None, &content, None);
             remember_upload(state, account_key, content_hash, false);
             return Err(format!("Could not read the snapshot: {error}"));
         }
     };
+    // Boss kills from the combat log go along as the snapshot's own top-level field; the
+    // read positions only move once the upload succeeded, so a failed upload sends them again.
+    let settings = state.snapshot();
+    let (combat_log, combat_log_positions) = if settings.combat_log_encounters {
+        let (kills, positions) = combatlog::collect(client_dir, &settings.combat_log_offsets);
+        (combatlog::upload(&kills), Some(positions))
+    } else {
+        (None, None)
+    };
+    if let Some(combat_log) = &combat_log {
+        snapshot["combatLog"] = combat_log.clone();
+    }
     let payload = serde_json::to_vec(&snapshot)
         .map_err(|e| format!("Could not encode the snapshot as JSON: {e}"))?;
     let compressed = gzip(&payload).map_err(|e| format!("Could not prepare the upload: {e}"))?;
@@ -1517,7 +1539,7 @@ async fn upload_client(
         // A permanent rejection always repeats itself for the same content.
         if is_permanent_rejection(status) {
             state.clear_retry(account_key);
-            let _ = archive_snapshot(&state.archive_dir, &label, None, &content);
+            let _ = archive_snapshot(&state.archive_dir, &label, None, &content, None);
             remember_upload(state, account_key, content_hash, false);
         } else {
             state.defer_retry(account_key, wait);
@@ -1533,7 +1555,16 @@ async fn upload_client(
         .and_then(|json| json.get("id").and_then(|id| id.as_str()).map(str::to_owned));
     state.clear_retry(account_key);
     remember_upload(state, account_key, content_hash, true);
-    let archived = archive_snapshot(&state.archive_dir, &label, import_id.as_deref(), &content);
+    if let Some(positions) = combat_log_positions {
+        state.update(|settings| settings.combat_log_offsets.extend(positions));
+    }
+    let archived = archive_snapshot(
+        &state.archive_dir,
+        &label,
+        import_id.as_deref(),
+        &content,
+        combat_log.as_ref(),
+    );
     {
         let mut unarchived = state.unarchived.lock().unwrap();
         if archived.is_ok() {
@@ -1604,6 +1635,7 @@ fn archive_snapshot(
     label: &str,
     import_id: Option<&str>,
     content: &[u8],
+    combat_log: Option<&serde_json::Value>,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(archive_dir)
         .map_err(|e| format!("Could not create the archive folder: {e}"))?;
@@ -1614,6 +1646,13 @@ fn archive_snapshot(
     let name = format!("{stamp}-{label}-{}.lua", archive_id(import_id));
     let archived = archive_dir.join(name);
     fs::write(&archived, content).map_err(|e| format!("Could not write the archive copy: {e}"))?;
+    // The combat log kills are not in the .lua; they sit next to it under the same name.
+    if let Some(combat_log) = combat_log {
+        let text = serde_json::to_vec_pretty(combat_log)
+            .map_err(|e| format!("Could not encode the combat log kills: {e}"))?;
+        fs::write(combat_log_archive(&archived), text)
+            .map_err(|e| format!("Could not write the combat log archive copy: {e}"))?;
+    }
     let mut files: Vec<PathBuf> = fs::read_dir(archive_dir)
         .into_iter()
         .flatten()
@@ -1624,8 +1663,14 @@ fn archive_snapshot(
     files.sort();
     for old in files.iter().take(files.len().saturating_sub(ARCHIVE_LIMIT)) {
         let _ = fs::remove_file(old);
+        let _ = fs::remove_file(combat_log_archive(old));
     }
     Ok(archived)
+}
+
+/// `<archive>.lua` -> `<archive>.combatlog.json`
+fn combat_log_archive(archived: &Path) -> PathBuf {
+    archived.with_extension("combatlog.json")
 }
 
 /// Client and account in a form fit for a file name ("Classic Era", "1234#1" ->
@@ -1675,6 +1720,17 @@ async fn upload(
 #[tauri::command]
 fn get_settings(app: AppHandle, state: tauri::State<'_, AppState>) -> SettingsView {
     state.snapshot().view(&app)
+}
+
+#[tauri::command]
+fn set_combat_log_encounters(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> SettingsView {
+    state
+        .update(|settings| settings.combat_log_encounters = enabled)
+        .view(&app)
 }
 
 #[tauri::command]
@@ -2274,6 +2330,7 @@ async fn watch_account(
                         &archive_label(&client.label, &account.name),
                         None,
                         &content,
+                        None,
                     )
                 });
             if archived.is_err() {
@@ -2606,6 +2663,7 @@ pub fn run() {
             upload,
             get_settings,
             set_auto_upload,
+            set_combat_log_encounters,
             set_close_to_tray,
             set_autostart,
             link_account,
@@ -2772,7 +2830,10 @@ mod tests {
         // other flavours are rejected
         let mut settings = Settings::default();
         let error = register_folder(&mut settings, &retail).unwrap_err();
-        assert!(error.contains("Only Forever, Forever Beta and Classic Era"), "{error}");
+        assert!(
+            error.contains("Only Forever, Forever Beta and Classic Era"),
+            "{error}"
+        );
         assert!(settings.extra_clients.is_empty());
 
         // an installation without launcher file activates its supported folders
@@ -2968,8 +3029,15 @@ mod tests {
         let mut settings = Settings::default();
         let users = users_of(&status(&settings));
         assert_eq!(users, vec!["112598966"]);
-        assert!(ensure_identities(&mut settings, users.iter().map(String::as_str)));
-        settings.identities.get_mut("112598966").unwrap().linked_account = Some("Alex".into());
+        assert!(ensure_identities(
+            &mut settings,
+            users.iter().map(String::as_str)
+        ));
+        settings
+            .identities
+            .get_mut("112598966")
+            .unwrap()
+            .linked_account = Some("Alex".into());
 
         let accounts: Vec<AccountStatus> = status(&settings)
             .into_iter()
@@ -3325,20 +3393,23 @@ mod tests {
         let dir = temp_dir("archive-failure");
         let blocker = dir.join("not-a-dir");
         fs::write(&blocker, b"x").unwrap();
-        assert!(archive_snapshot(&blocker, "Client", None, b"data").is_err());
+        assert!(archive_snapshot(&blocker, "Client", None, b"data", None).is_err());
     }
 
     #[test]
     fn archive_snapshot_writes_and_sanitizes_id() {
         let dir = temp_dir("archive-id");
-        let path = archive_snapshot(&dir, "Client", Some("../../evil"), b"data").unwrap();
+        let path = archive_snapshot(&dir, "Client", Some("../../evil"), b"data", None).unwrap();
         assert_eq!(path.parent().unwrap(), dir.as_path());
         assert!(path
             .file_name()
             .unwrap()
             .to_string_lossy()
             .ends_with("-upload.lua"));
-        let path = archive_snapshot(&dir, "Client", Some("0f8c-12ab"), b"data").unwrap();
+        let kills = serde_json::json!({ "kills": [] });
+        let path =
+            archive_snapshot(&dir, "Client", Some("0f8c-12ab"), b"data", Some(&kills)).unwrap();
+        assert!(path.with_extension("combatlog.json").is_file());
         assert!(path
             .file_name()
             .unwrap()

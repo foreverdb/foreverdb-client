@@ -51,6 +51,12 @@ WoW writes the SavedVariables only on logout, on `/reload` and on exit. The app 
 
 **Warnings:** The app warns when the game has run for more than 2 h without writing the file. In the game, `/fc save` fixes that. It also warns when the client's `Errors/` folder holds a crash report newer than the last save; the data of that session was then never written.
 
+## Boss kills from the combat log
+
+Inside dungeons and raids the game hides the GUIDs of hostile units from addons, so ForeverCollect cannot tell which creatures an encounter's bosses are. The game's combat log file still has them; the addon turns logging on in instances (`/fc combatlog`). With every upload the app reads the new lines of `<flavour>/Logs/WoWCombatLog*.txt` and sends, per successful encounter, the creatures that died during the fight as the snapshot's top-level `combatLog` (ForeverCollect `SCHEMA.md` section 15). The catalogs stay as the addon wrote them; the server matches each kill to the catalog of its client version. Only encounter IDs, creature IDs, their names and times are sent; no player names and no raw log lines.
+
+The read position per log file is kept in `settings.json` (`combat_log_offsets`) and only moves after a successful upload, so nothing is sent twice and a failed upload sends the kills again. An encounter still in progress is read with the next upload. The archive keeps the sent kills next to the snapshot as `<name>.combatlog.json`. The log files themselves are never changed or deleted. The setting "Boss kills from the combat log" (on by default) turns it off.
+
 ## Tray and autostart
 
 **Tray:** The uploader shows a tray icon; a left click or "Show ForeverDB Uploader" in its menu opens the window, "Quit" ends the app. The menu also shows the update state of the uploader and the addon (see "Updates") and offers "Check for updates". With "Closing the window keeps the uploader running in the tray" (on by default) closing the window only hides it, and the watcher keeps uploading. Switched off, closing the window quits. On GNOME the tray icon needs the AppIndicator extension; without it, starting the app again brings the window back.

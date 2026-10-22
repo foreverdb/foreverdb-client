@@ -95,7 +95,7 @@ type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
 type UploadResult = { import_id: string | null; file_path: string; running: boolean; deleted: boolean };
-type Settings = { auto_upload: boolean; close_to_tray: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; repository: string };
+type Settings = { auto_upload: boolean; close_to_tray: boolean; combat_log_encounters: boolean; autostart: boolean; extra_clients: string[]; extra_installations: string[]; repository: string };
 type ImportStatus = { import_id: string; status: "queued" | "processing" | "completed" | "failed"; error: string | null };
 type Activity = {
   client: string;
@@ -660,6 +660,7 @@ function App() {
 
   const preferences = [
     { command: "set_auto_upload", value: settings?.auto_upload ?? true, title: "Upload automatically", hint: "Whenever WoW writes the file" },
+    { command: "set_combat_log_encounters", value: settings?.combat_log_encounters ?? true, title: "Boss kills from the combat log", hint: "Only boss and creature IDs, no player names" },
     { command: "set_autostart", value: settings?.autostart ?? false, title: "Launch at startup", hint: "Minimized to the tray" },
     { command: "set_close_to_tray", value: settings?.close_to_tray ?? true, title: "Minimize to system tray", hint: "The uploader stays in the tray" },
   ];
