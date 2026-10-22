@@ -1,6 +1,6 @@
 [package]
 name = "foreverdb-uploader"
-version = "0.5.0"
+version = "0.6.0"
 description = "Uploads ForeverCollect SavedVariables from World of Warcraft: Forever and Classic Hardcore to ForeverDB"
 authors = ["Alex Bangert"]
 license = "MIT"
