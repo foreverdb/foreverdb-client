@@ -1,6 +1,6 @@
 [package]
 name = "foreverdb-uploader"
-version = "0.6.0"
+version = "0.6.1"
 description = "Uploads ForeverCollect SavedVariables from World of Warcraft: Forever and Classic Hardcore to ForeverDB"
 authors = ["Alex Bangert"]
 license = "MIT"
@@ -31,6 +31,8 @@ tauri-plugin-dialog = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 uuid = { version = "1", features = ["v4"] }
+# The computer's UTC offset, for combat log lines written without one.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Start with the system; one instance only (a second start shows the running one).
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"

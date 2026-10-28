@@ -8,6 +8,7 @@
 //! the addon's catalogs and apart from them (addon SCHEMA.md section 15); the worker
 //! matches each kill to the catalog of its client version.
 
+use chrono::{DateTime, Local, Offset, TimeZone};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -38,8 +39,8 @@ pub struct Kill {
     pub name: Option<String>,
     pub difficulty_id: Option<i64>,
     pub instance_id: Option<i64>,
-    /// Unix seconds of ENCOUNTER_END; exact when the log line carries its UTC offset,
-    /// otherwise the log's local clock read as UTC.
+    /// Unix seconds of ENCOUNTER_END; lines without a UTC offset are in the computer's
+    /// local time.
     pub at: i64,
     /// BUILD_VERSION and PROJECT_ID of the last COMBAT_LOG_VERSION line, to pick the
     /// catalog of the same client version.
@@ -77,7 +78,7 @@ impl LogParser {
         let event = body.split(',').next().unwrap_or("");
         if !matches!(
             event,
-            "COMBAT_LOG_VERSION" | "ENCOUNTER_START" | "ENCOUNTER_END" | "UNIT_DIED"
+            "COMBAT_LOG_VERSION" | "ENCOUNTER_START" | "ENCOUNTER_END" | "UNIT_DIED" | "PARTY_KILL"
         ) {
             return;
         }
@@ -86,8 +87,13 @@ impl LogParser {
             self.header(&fields);
             return;
         }
-        let Some(time) = parse_timestamp(stamp, fallback_year) else {
+        let Some((time, has_offset)) = parse_timestamp(stamp, fallback_year) else {
             return;
+        };
+        let time = if has_offset {
+            time
+        } else {
+            time - local_offset(time)
         };
         self.last_time = time;
         match event {
@@ -105,7 +111,9 @@ impl LogParser {
                     deaths: Vec::new(),
                 });
             }
-            "UNIT_DIED" => {
+            // UNIT_DIED of the boss can follow ENCOUNTER_END by a few milliseconds (SoD,
+            // 1.15.9); PARTY_KILL, with the same target fields, comes before it.
+            "UNIT_DIED" | "PARTY_KILL" => {
                 let Some(open) = self.open.as_mut() else {
                     return;
                 };
@@ -206,9 +214,10 @@ fn npc_id_of(guid: &str) -> Option<i64> {
     parts.nth(4)?.parse().ok().filter(|id| *id > 0)
 }
 
-/// `10/22/2026 20:15:03.1234-4` (current clients) or `10/22 20:15:03.123` (older ones,
-/// without year and offset) as Unix seconds.
-fn parse_timestamp(stamp: &str, fallback_year: i64) -> Option<f64> {
+/// `10/22/2026 20:15:03.1234-4` (current clients), `10/28/2026 18:47:58.1131` (SoD 1.15.9,
+/// without offset) or `10/22 20:15:03.123` (older ones, without year and offset) as Unix
+/// seconds, read as UTC without an offset, and whether the line had one.
+fn parse_timestamp(stamp: &str, fallback_year: i64) -> Option<(f64, bool)> {
     let (date, clock) = stamp.trim().split_once(' ')?;
     let mut date_parts = date.split('/');
     let month: i64 = date_parts.next()?.parse().ok()?;
@@ -219,15 +228,30 @@ fn parse_timestamp(stamp: &str, fallback_year: i64) -> Option<f64> {
     };
     // The UTC offset follows the fraction: "20:15:03.1234-4" or "…+2".
     let (clock, offset_hours) = match clock.rfind(['+', '-']) {
-        Some(index) if index > 0 => (&clock[..index], clock[index..].parse::<f64>().ok()?),
-        _ => (clock, 0.0),
+        Some(index) if index > 0 => (&clock[..index], Some(clock[index..].parse::<f64>().ok()?)),
+        _ => (clock, None),
     };
     let mut clock_parts = clock.split(':');
     let hours: f64 = clock_parts.next()?.parse().ok()?;
     let minutes: f64 = clock_parts.next()?.parse().ok()?;
     let seconds: f64 = clock_parts.next()?.parse().ok()?;
     let days = days_from_civil(year, month, day) as f64;
-    Some(days * 86400.0 + hours * 3600.0 + minutes * 60.0 + seconds - offset_hours * 3600.0)
+    let local = days * 86400.0 + hours * 3600.0 + minutes * 60.0 + seconds;
+    Some((
+        local - offset_hours.unwrap_or(0.0) * 3600.0,
+        offset_hours.is_some(),
+    ))
+}
+
+/// Seconds the computer's clock is ahead of UTC at this local time (read as UTC).
+fn local_offset(local: f64) -> f64 {
+    DateTime::from_timestamp(local.floor() as i64, 0)
+        .and_then(|time| {
+            Local
+                .offset_from_local_datetime(&time.naive_utc())
+                .earliest()
+        })
+        .map_or(0.0, |offset| f64::from(offset.fix().local_minus_utc()))
 }
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's algorithm).
@@ -455,6 +479,23 @@ mod tests {
     }
 
     #[test]
+    fn takes_the_party_kill_when_the_death_follows_the_end() {
+        // Bazzalan, Ragefire Chasm on SoD 1.15.9: UNIT_DIED 23 ms after ENCOUNTER_END.
+        let kills = parse(concat!(
+            "10/28/2026 18:50:07.2951+1  ENCOUNTER_START,2735,\"Bazzalan\",1,5,389,2\n",
+            "10/28/2026 18:50:08.2231+1  UNIT_DIED,0000000000000000,nil,0x80000000,0x80000000,Creature-0-5251-389-314-11322-00006234C9,\"Searing Blade Cultist\",0xa48,0x80000000,0\n",
+            "10/28/2026 18:50:09.4731+1  PARTY_KILL,Player-5825-05516FF0,\"Someone-Realm\",0x512,0x80000000,Creature-0-5251-389-314-11519-00006234C8,\"Bazzalan\",0xa48,0x80000000,0\n",
+            "10/28/2026 18:50:09.4841+1  ENCOUNTER_END,2735,\"Bazzalan\",1,5,1\n",
+            "10/28/2026 18:50:09.5071+1  UNIT_DIED,0000000000000000,nil,0x80000000,0x80000000,Creature-0-5251-389-314-11519-00006234C8,\"Bazzalan\",0xa48,0x80000000,0\n",
+        ));
+        assert_eq!(kills.len(), 1);
+        let ids: Vec<i64> = kills[0].deaths.iter().map(|death| death.npc_id).collect();
+        assert_eq!(ids, vec![11322, 11519]);
+        assert_eq!(kills[0].deaths[1].seconds_before_end, 0.011);
+        assert_eq!(kills[0].at, 1_793_209_809, "17:50:09 UTC");
+    }
+
+    #[test]
     fn keeps_every_member_of_a_council() {
         let kills = parse(&fixture());
         let council = &kills[1];
@@ -472,9 +513,13 @@ mod tests {
     #[test]
     fn reads_timestamps_with_and_without_year() {
         let with_offset = parse_timestamp("10/22/2026 20:15:03.500-4", 2000).unwrap();
-        let utc = parse_timestamp("10/23/2026 00:15:03.500", 2000).unwrap();
-        assert_eq!(with_offset, utc);
-        assert_eq!(parse_timestamp("1/1 00:00:00.000", 1970), Some(0.0));
+        let local = parse_timestamp("10/23/2026 00:15:03.500", 2000).unwrap();
+        assert_eq!(with_offset, (local.0, true));
+        assert!(!local.1);
+        assert_eq!(
+            parse_timestamp("1/1 00:00:00.000", 1970),
+            Some((0.0, false))
+        );
         assert_eq!(year_of(1_792_689_851), 2026);
         assert_eq!(year_of(0), 1970);
     }
