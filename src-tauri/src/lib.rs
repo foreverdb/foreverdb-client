@@ -2564,18 +2564,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
+            // Only enabled while an update is available.
             "uploader_update" => {
-                let state = app.state::<AppState>();
-                let url = state
-                    .uploader_release
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|cache| cache.result.as_ref().ok())
-                    .map(|release| release.html_url.clone());
-                if let Some(url) = url {
-                    let _ = app.opener().open_url(url, None::<&str>);
-                }
+                let _ = app.opener().open_url(update::DOWNLOAD_URL, None::<&str>);
             }
             // The addon is installed per client, which the window offers.
             "addon_update" => show_main_window(app),
@@ -3279,7 +3270,6 @@ mod tests {
         let newer = UploaderRelease {
             version: "999.0.0".into(),
             published_at: String::new(),
-            html_url: String::new(),
         };
         let current = UploaderRelease {
             version: update::CURRENT_VERSION.into(),

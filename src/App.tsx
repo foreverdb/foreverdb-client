@@ -90,7 +90,7 @@ function accountBadge(account: AccountStatus): { tone: "success" | "warning" | "
 }
 
 type AddonRelease = { version: string; name: string; notes: string; published_at: string; html_url: string; asset_name: string; asset_size: number };
-type UploaderUpdate = { current: string; latest: { version: string; published_at: string; html_url: string }; available: boolean };
+type UploaderUpdate = { current: string; latest: { version: string; published_at: string }; available: boolean };
 type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
@@ -683,7 +683,7 @@ function App() {
         <div className="update-banner">
           <strong>ForeverDB Uploader v{uploaderUpdate.latest.version} is available</strong>
           <span>Installed: v{uploaderUpdate.current}</span>
-          <SiteLink path="/info/uploader">Download</SiteLink>
+          <SiteLink path="/info/uploader#download-platforms">Download</SiteLink>
         </div>
       )}
 

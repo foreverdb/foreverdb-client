@@ -1,12 +1,14 @@
 //! The uploader's own releases: whether GitHub has a newer version than the running one.
-//! The uploader does not install it; it points to the release page, which serves every
-//! package format (Windows installer, AppImage, deb, rpm).
+//! The uploader does not install it; it points to the download page on foreverdb.app, which
+//! offers every package format (Windows installer, AppImage, deb, rpm).
 
 use crate::addon;
 use serde::Serialize;
 
 const DEFAULT_REPO: &str = "foreverdb/foreverdb-client";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Where a new version is downloaded: the platform list on the uploader page.
+pub const DOWNLOAD_URL: &str = "https://www.foreverdb.app/en/info/uploader#download-platforms";
 
 pub fn repository() -> String {
     std::env::var("FOREVERDB_UPLOADER_REPO")
@@ -19,7 +21,6 @@ pub fn repository() -> String {
 pub struct UploaderRelease {
     pub version: String,
     pub published_at: String,
-    pub html_url: String,
 }
 
 impl UploaderRelease {
@@ -36,7 +37,6 @@ pub async fn fetch_latest_release() -> Result<UploaderRelease, String> {
     newest(releases.into_iter().map(|release| UploaderRelease {
         version: release.tag_name.trim_start_matches(['v', 'V']).to_string(),
         published_at: release.published_at.unwrap_or_default(),
-        html_url: release.html_url,
     }))
     .ok_or_else(|| "The uploader repository has no release yet.".to_string())
 }
@@ -56,7 +56,6 @@ mod tests {
         UploaderRelease {
             version: version.to_string(),
             published_at: String::new(),
-            html_url: format!("https://example.test/v{version}"),
         }
     }
 

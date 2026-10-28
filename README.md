@@ -79,7 +79,7 @@ The uploader converts the SavedVariables to JSON itself and uploads only that (`
 
 ## Updates
 
-**Uploader:** On start and every 6 hours, the uploader also fetches the releases of its own repository (`foreverdb/foreverdb-client`, overridable with `FOREVERDB_UPLOADER_REPO`) and compares the highest version, pre-releases included, with its own. It does not install itself: a newer version shows a notice with a download link in the window, and the tray entry "Uploader vX available – download …" opens the release page. The footer of the window shows the running version and checks by hand.
+**Uploader:** On start and every 6 hours, the uploader also fetches the releases of its own repository (`foreverdb/foreverdb-client`, overridable with `FOREVERDB_UPLOADER_REPO`) and compares the highest version, pre-releases included, with its own. It does not install itself: a newer version shows a notice in the window and the tray entry "Uploader vX available – download …"; both open the download list on foreverdb.app (`/en/info/uploader#download-platforms`). The footer of the window shows the running version and checks by hand.
 
 **Notifications:** A new uploader or addon release (for an addon that is installed and older) is shown once per version as a desktop notification, also while the window is hidden; the versions already notified are kept in `settings.json`. "Check for updates" in the tray reports its result as a notification as well, including that nothing is new. On Linux the notifications need a notification service (every common desktop has one).
 
