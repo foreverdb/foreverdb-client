@@ -660,7 +660,7 @@ function App() {
 
   const preferences = [
     { command: "set_auto_upload", value: settings?.auto_upload ?? true, title: "Upload automatically", hint: "Whenever WoW writes the file" },
-    { command: "set_combat_log_encounters", value: settings?.combat_log_encounters ?? true, title: "Boss kills from the combat log", hint: "Only boss and creature IDs, no player names" },
+    { command: "set_combat_log_encounters", value: settings?.combat_log_encounters ?? true, title: "Boss kills and abilities from the combat log", hint: "Only creature and spell IDs, no player names" },
     { command: "set_autostart", value: settings?.autostart ?? false, title: "Launch at startup", hint: "Minimized to the tray" },
     { command: "set_close_to_tray", value: settings?.close_to_tray ?? true, title: "Minimize to system tray", hint: "The uploader stays in the tray" },
   ];

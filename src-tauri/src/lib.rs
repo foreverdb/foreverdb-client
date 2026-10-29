@@ -1496,12 +1496,14 @@ async fn upload_client(
             return Err(format!("Could not read the snapshot: {error}"));
         }
     };
-    // Boss kills from the combat log go along as the snapshot's own top-level field; the
-    // read positions only move once the upload succeeded, so a failed upload sends them again.
+    // Boss kills and creature abilities from the combat log go along as the snapshot's own
+    // top-level field; the read positions only move once the upload succeeded, so a failed
+    // upload sends them again.
     let settings = state.snapshot();
     let (combat_log, combat_log_positions) = if settings.combat_log_encounters {
-        let (kills, positions) = combatlog::collect(client_dir, &settings.combat_log_offsets);
-        (combatlog::upload(&kills), Some(positions))
+        let (kills, abilities, positions) =
+            combatlog::collect(client_dir, &settings.combat_log_offsets);
+        (combatlog::upload(&kills, &abilities), Some(positions))
     } else {
         (None, None)
     };
@@ -1646,10 +1648,11 @@ fn archive_snapshot(
     let name = format!("{stamp}-{label}-{}.lua", archive_id(import_id));
     let archived = archive_dir.join(name);
     fs::write(&archived, content).map_err(|e| format!("Could not write the archive copy: {e}"))?;
-    // The combat log kills are not in the .lua; they sit next to it under the same name.
+    // The combat log kills and abilities are not in the .lua; they sit next to it under the
+    // same name.
     if let Some(combat_log) = combat_log {
         let text = serde_json::to_vec_pretty(combat_log)
-            .map_err(|e| format!("Could not encode the combat log kills: {e}"))?;
+            .map_err(|e| format!("Could not encode the combat log data: {e}"))?;
         fs::write(combat_log_archive(&archived), text)
             .map_err(|e| format!("Could not write the combat log archive copy: {e}"))?;
     }

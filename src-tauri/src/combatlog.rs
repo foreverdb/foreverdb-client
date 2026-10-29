@@ -1,16 +1,16 @@
 //! Reads the game's combat log (`<flavour>/Logs/WoWCombatLog*.txt`) for the creatures that
-//! died during each successful boss encounter. Inside dungeons and raids the addon cannot
-//! read hostile GUIDs (secret values), the log file still has them; the addon turns logging
-//! on there (`/fc combatlog`).
+//! died during each successful boss encounter and the spells creatures used. Addons get no
+//! combat data (hostile GUIDs are secret in dungeons and raids, casts are hidden
+//! everywhere), the log file still has it; the addon turns logging on (`/fc combatlog`).
 //!
-//! Only encounter IDs, creature IDs, their names and times leave the computer: no player
-//! names, no raw lines. The kills travel as the snapshot's top-level `combatLog`, next to
-//! the addon's catalogs and apart from them (addon SCHEMA.md section 15); the worker
-//! matches each kill to the catalog of its client version.
+//! Only encounter, creature and spell IDs, creature names and times leave the computer: no
+//! player names, no raw lines. Kills and abilities travel as the snapshot's top-level
+//! `combatLog`, next to the addon's catalogs and apart from them (addon SCHEMA.md section
+//! 15); the worker matches each entry to the catalog of its client version.
 
 use chrono::{DateTime, Local, Offset, TimeZone};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -25,6 +25,12 @@ const ACTIVE_FILE_SECONDS: u64 = 600;
 
 /// COMBATLOG_OBJECT_REACTION_HOSTILE: only hostile creatures are boss candidates.
 const REACTION_HOSTILE: u64 = 0x40;
+
+/// COMBATLOG_OBJECT_REACTION_NEUTRAL: neutral creatures fight and cast too.
+const REACTION_NEUTRAL: u64 = 0x20;
+
+/// COMBATLOG_OBJECT_CONTROL_NPC: leaves out player pets and charmed creatures.
+const CONTROL_NPC: u64 = 0x200;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Death {
@@ -49,6 +55,20 @@ pub struct Kill {
     pub deaths: Vec<Death>,
 }
 
+/// A spell a creature used, once per client version, creature and spell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ability {
+    pub version: Option<String>,
+    pub project_id: Option<i64>,
+    pub npc_id: i64,
+    pub spell_id: i64,
+    pub name: Option<String>,
+    /// The event kinds the pair was seen with, e.g. SPELL_CAST_SUCCESS, SPELL_DAMAGE.
+    pub events: BTreeSet<String>,
+}
+
+type AbilityKey = (Option<String>, Option<i64>, i64, i64);
+
 struct OpenEncounter {
     encounter_id: i64,
     name: Option<String>,
@@ -67,7 +87,26 @@ struct LogParser {
     project_id: Option<i64>,
     open: Option<OpenEncounter>,
     kills: Vec<Kill>,
+    abilities: BTreeMap<AbilityKey, (Option<String>, BTreeSet<String>)>,
     last_time: f64,
+}
+
+/// Events whose source used the spell in field 9: every SPELL_* except SPELL_ABSORBED (other
+/// layout) and the aura events that only follow SPELL_AURA_APPLIED, plus RANGE_* and
+/// DAMAGE_SHIELD*.
+fn is_ability_event(event: &str) -> bool {
+    if event.starts_with("RANGE_") || event.starts_with("DAMAGE_SHIELD") {
+        return true;
+    }
+    event.starts_with("SPELL_")
+        && event != "SPELL_ABSORBED"
+        && !event.starts_with("SPELL_AURA_REMOVED")
+        && !event.starts_with("SPELL_AURA_BROKEN")
+        && event != "SPELL_AURA_REFRESH"
+}
+
+fn flags_of(field: Option<&String>) -> Option<u64> {
+    field.and_then(|flags| u64::from_str_radix(flags.trim_start_matches("0x"), 16).ok())
 }
 
 impl LogParser {
@@ -76,6 +115,10 @@ impl LogParser {
             return;
         };
         let event = body.split(',').next().unwrap_or("");
+        if is_ability_event(event) {
+            self.ability(event, &split_fields(body.trim_end()));
+            return;
+        }
         if !matches!(
             event,
             "COMBAT_LOG_VERSION" | "ENCOUNTER_START" | "ENCOUNTER_END" | "UNIT_DIED" | "PARTY_KILL"
@@ -120,10 +163,8 @@ impl LogParser {
                 let Some(npc_id) = fields.get(5).and_then(|guid| npc_id_of(guid)) else {
                     return;
                 };
-                let hostile = fields
-                    .get(7)
-                    .and_then(|flags| u64::from_str_radix(flags.trim_start_matches("0x"), 16).ok())
-                    .is_none_or(|flags| flags & REACTION_HOSTILE != 0);
+                let hostile =
+                    flags_of(fields.get(7)).is_none_or(|flags| flags & REACTION_HOSTILE != 0);
                 if !hostile {
                     return;
                 }
@@ -161,6 +202,44 @@ impl LogParser {
             }
             _ => {}
         }
+    }
+
+    /// A spell event of a hostile or neutral NPC-controlled creature.
+    fn ability(&mut self, event: &str, fields: &[String]) {
+        let Some(npc_id) = fields.get(1).and_then(|guid| npc_id_of(guid)) else {
+            return;
+        };
+        let Some(flags) = flags_of(fields.get(3)) else {
+            return;
+        };
+        if flags & CONTROL_NPC == 0 || flags & (REACTION_HOSTILE | REACTION_NEUTRAL) == 0 {
+            return;
+        }
+        let Some(spell_id) = int_field(fields, 9).filter(|id| *id > 0) else {
+            return;
+        };
+        let key = (self.version.clone(), self.project_id, npc_id, spell_id);
+        let entry = self.abilities.entry(key).or_default();
+        if entry.0.is_none() {
+            entry.0 = text_field(fields, 2);
+        }
+        entry.1.insert(event.to_string());
+    }
+
+    fn take_abilities(&mut self) -> Vec<Ability> {
+        std::mem::take(&mut self.abilities)
+            .into_iter()
+            .map(
+                |((version, project_id, npc_id, spell_id), (name, events))| Ability {
+                    version,
+                    project_id,
+                    npc_id,
+                    spell_id,
+                    name,
+                    events,
+                },
+            )
+            .collect()
     }
 
     /// `COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,0,BUILD_VERSION,1.15.7,PROJECT_ID,2`
@@ -288,7 +367,7 @@ fn read_file(
     offset: u64,
     active: bool,
     fallback_year: i64,
-) -> std::io::Result<(Vec<Kill>, u64)> {
+) -> std::io::Result<(Vec<Kill>, Vec<Ability>, u64)> {
     let mut file = File::open(path)?;
     let mut parser = LogParser::default();
     // The version header is the first line; reading resumes further down.
@@ -317,7 +396,8 @@ fn read_file(
         }
         _ => position,
     };
-    Ok((parser.kills, resume))
+    let abilities = parser.take_abilities();
+    Ok((parser.kills, abilities, resume))
 }
 
 fn log_files(flavour_dir: &Path) -> Vec<PathBuf> {
@@ -342,14 +422,16 @@ fn log_files(flavour_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Kills logged since the given read positions (keyed by file path), and the positions
-/// after them. Unreadable files are skipped and keep their position.
+/// Kills and abilities logged since the given read positions (keyed by file path), and the
+/// positions after them. Unreadable files are skipped and keep their position. Lines after
+/// a still open encounter are read again next time; abilities are a set, so that is harmless.
 pub fn collect(
     flavour_dir: &Path,
     offsets: &HashMap<String, u64>,
-) -> (Vec<Kill>, HashMap<String, u64>) {
+) -> (Vec<Kill>, Vec<Ability>, HashMap<String, u64>) {
     let now = SystemTime::now();
     let mut kills = Vec::new();
+    let mut abilities: Vec<Ability> = Vec::new();
     let mut positions = HashMap::new();
     for path in log_files(flavour_dir) {
         let key = path.to_string_lossy().into_owned();
@@ -378,8 +460,11 @@ pub fn collect(
                 .unwrap_or(0),
         );
         match read_file(&path, offset, age < ACTIVE_FILE_SECONDS, year) {
-            Ok((found, resume)) => {
+            Ok((found, used, resume)) => {
                 kills.extend(found);
+                for ability in used {
+                    merge_ability(&mut abilities, ability);
+                }
                 positions.insert(key, resume);
             }
             Err(_) => {
@@ -387,12 +472,31 @@ pub fn collect(
             }
         }
     }
-    (kills, positions)
+    (kills, abilities, positions)
 }
 
-/// The snapshot's top-level `combatLog` for these kills, or None without kills.
-pub fn upload(kills: &[Kill]) -> Option<Value> {
-    if kills.is_empty() {
+/// Adds an ability, merging the events of the same version, creature and spell.
+fn merge_ability(abilities: &mut Vec<Ability>, ability: Ability) {
+    match abilities.iter_mut().find(|known| {
+        known.version == ability.version
+            && known.project_id == ability.project_id
+            && known.npc_id == ability.npc_id
+            && known.spell_id == ability.spell_id
+    }) {
+        Some(known) => {
+            known.events.extend(ability.events);
+            if known.name.is_none() {
+                known.name = ability.name;
+            }
+        }
+        None => abilities.push(ability),
+    }
+}
+
+/// The snapshot's top-level `combatLog` for these kills and abilities, or None without
+/// either.
+pub fn upload(kills: &[Kill], abilities: &[Ability]) -> Option<Value> {
+    if kills.is_empty() && abilities.is_empty() {
         return None;
     }
     let kills: Vec<Value> = kills
@@ -423,7 +527,37 @@ pub fn upload(kills: &[Kill]) -> Option<Value> {
             entry
         })
         .collect();
-    Some(json!({ "kills": kills }))
+    let abilities: Vec<Value> = abilities
+        .iter()
+        .map(|ability| {
+            let mut entry = json!({
+                "npcID": ability.npc_id,
+                "spellID": ability.spell_id,
+                "events": ability.events,
+            });
+            for (key, value) in [
+                (
+                    "version",
+                    ability.version.as_ref().map(|version| json!(version)),
+                ),
+                ("projectID", ability.project_id.map(|id| json!(id))),
+                ("name", ability.name.as_ref().map(|name| json!(name))),
+            ] {
+                if let Some(value) = value {
+                    entry[key] = value;
+                }
+            }
+            entry
+        })
+        .collect();
+    let mut combat_log = json!({});
+    if !kills.is_empty() {
+        combat_log["kills"] = json!(kills);
+    }
+    if !abilities.is_empty() {
+        combat_log["abilities"] = json!(abilities);
+    }
+    Some(combat_log)
 }
 
 #[cfg(test)]
@@ -438,14 +572,35 @@ mod tests {
         .unwrap()
     }
 
-    fn parse(text: &str) -> Vec<Kill> {
+    fn parser_for(text: &str) -> LogParser {
         let mut parser = LogParser::default();
         let mut position = 0;
         for line in text.split_inclusive('\n') {
             parser.line(line, position, 2026);
             position += line.len() as u64;
         }
-        parser.kills
+        parser
+    }
+
+    fn parse(text: &str) -> Vec<Kill> {
+        parser_for(text).kills
+    }
+
+    fn parse_abilities(text: &str) -> Vec<Ability> {
+        parser_for(text).take_abilities()
+    }
+
+    fn pairs(abilities: &[Ability]) -> Vec<(i64, i64, Vec<&str>)> {
+        abilities
+            .iter()
+            .map(|ability| {
+                (
+                    ability.npc_id,
+                    ability.spell_id,
+                    ability.events.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect()
     }
 
     fn temp_flavour(name: &str) -> PathBuf {
@@ -476,6 +631,46 @@ mod tests {
         assert_eq!(kresh.deaths[1].seconds_before_end, 0.012);
         assert_eq!(kresh.deaths[1].name.as_deref(), Some("Kresh"));
         assert_eq!(kresh.deaths[0].seconds_before_end, 20.5);
+    }
+
+    #[test]
+    fn finds_the_abilities_of_creatures() {
+        let abilities = parse_abilities(&fixture());
+        assert_eq!(
+            pairs(&abilities),
+            vec![
+                (3630, 744, vec!["SPELL_DAMAGE"]),
+                (3840, 782, vec!["DAMAGE_SHIELD"]),
+                (3840, 8040, vec!["SPELL_CAST_START", "SPELL_CAST_SUCCESS"]),
+            ],
+            "neutral creatures count; player pets, friendly NPCs, SPELL_ABSORBED and aura removals do not"
+        );
+        assert_eq!(abilities[0].name.as_deref(), Some("Deviate Coiler"));
+        assert_eq!(abilities[2].version.as_deref(), Some("1.60.1"));
+        assert_eq!(abilities[2].project_id, Some(2));
+    }
+
+    #[test]
+    fn reads_abilities_from_a_real_log() {
+        // Ragefire Chasm on SoD 1.15.9, outside and inside an encounter.
+        let abilities = parse_abilities(concat!(
+            "10/28/2026 18:45:44.7051  COMBAT_LOG_VERSION,9,ADVANCED_LOG_ENABLED,0,BUILD_VERSION,1.15.9,PROJECT_ID,2\n",
+            "10/28/2026 18:46:39.8361  SPELL_CAST_SUCCESS,Creature-0-5251-389-314-11319-00006234C9,\"Ragefire Shaman\",0xa48,0x80000000,Player-5825-05516FF0,\"Someone-Realm\",0x10512,0x80000000,9532,\"Lightning Bolt\",0x8,0000000000000000,0000000000000000,0,0,0,0,0,0,0,-1,0,0,0,0.00,0.00,0,0.0000,0\n",
+            "10/28/2026 18:47:57.7291  ENCOUNTER_START,2733,\"Taragaman the Hungerer\",1,5,389,2\n",
+            "10/28/2026 18:48:01.5951  SPELL_CAST_SUCCESS,Creature-0-5251-389-314-11324-00026234CA,\"Searing Blade Warlock\",0xa48,0x80000000,0000000000000000,nil,0x80000000,0x80000000,12746,\"Summon Voidwalker\",0x20,0000000000000000,0000000000000000,0,0,0,0,0,0,0,-1,0,0,0,0.00,0.00,0,0.0000,0\n",
+            "10/28/2026 18:48:01.6000  SPELL_SUMMON,Creature-0-5251-389-314-11324-00026234CA,\"Searing Blade Warlock\",0xa48,0x80000000,Creature-0-5251-389-314-11325-00026234CB,\"Voidwalker Minion\",0xa48,0x80000000,12746,\"Summon Voidwalker\",0x20\n",
+            "10/28/2026 18:45:46.1841  SPELL_AURA_APPLIED,Creature-0-5210-1-130-4949-00000504A6,\"Thrall\",0xa28,0x80000000,Player-5825-05516FF0,\"Someone-Realm\",0x10512,0x80000000,16609,\"Warchief's Blessing\",0x1,BUFF\n",
+        ));
+        assert_eq!(
+            pairs(&abilities),
+            vec![
+                (4949, 16609, vec!["SPELL_AURA_APPLIED"]),
+                (11319, 9532, vec!["SPELL_CAST_SUCCESS"]),
+                (11324, 12746, vec!["SPELL_CAST_SUCCESS", "SPELL_SUMMON"]),
+            ],
+            "the log reports quest givers such as Thrall as neutral"
+        );
+        assert_eq!(abilities[1].version.as_deref(), Some("1.15.9"));
     }
 
     #[test]
@@ -537,8 +732,9 @@ mod tests {
         fs::write(&path, &text[..line_start]).unwrap();
         let key = path.to_string_lossy().into_owned();
 
-        let (kills, positions) = collect(&dir, &HashMap::new());
+        let (kills, abilities, positions) = collect(&dir, &HashMap::new());
         assert_eq!(kills.len(), 1);
+        assert_eq!(abilities.len(), 3);
         let resume = positions[&key];
         assert!(
             resume < line_start as u64,
@@ -546,8 +742,9 @@ mod tests {
         );
 
         fs::write(&path, &text).unwrap();
-        let (kills, positions) = collect(&dir, &positions);
+        let (kills, abilities, positions) = collect(&dir, &positions);
         assert_eq!(kills.len(), 1);
+        assert!(abilities.is_empty(), "none after the cut");
         assert_eq!(kills[0].encounter_id, 2711);
         assert_eq!(
             kills[0].version.as_deref(),
@@ -556,15 +753,30 @@ mod tests {
         );
         assert_eq!(positions[&key], text.len() as u64);
 
-        let (kills, _) = collect(&dir, &positions);
+        let (kills, abilities, _) = collect(&dir, &positions);
         assert!(kills.is_empty(), "nothing is read twice");
+        assert!(abilities.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn builds_the_upload_field() {
-        assert_eq!(upload(&[]), None);
-        let upload = upload(&parse(&fixture())).unwrap();
+        assert_eq!(upload(&[], &[]), None);
+        let abilities = parse_abilities(&fixture());
+        let only_abilities = upload(&[], &abilities).unwrap();
+        assert!(only_abilities.get("kills").is_none());
+        assert_eq!(only_abilities["abilities"].as_array().unwrap().len(), 3);
+        let upload = upload(&parse(&fixture()), &abilities).unwrap();
+        let slumber = &upload["abilities"][2];
+        assert_eq!(slumber["npcID"], 3840);
+        assert_eq!(slumber["spellID"], 8040);
+        assert_eq!(slumber["name"], "Druid of the Fang");
+        assert_eq!(slumber["version"], "1.60.1");
+        assert_eq!(slumber["projectID"], 2);
+        assert_eq!(
+            slumber["events"],
+            json!(["SPELL_CAST_START", "SPELL_CAST_SUCCESS"])
+        );
         let kresh = &upload["kills"][0];
         assert_eq!(kresh["encounterID"], 586);
         assert_eq!(kresh["name"], "Kresh");
