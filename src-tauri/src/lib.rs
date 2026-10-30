@@ -17,6 +17,7 @@ use tauri_plugin_opener::OpenerExt;
 
 mod addon;
 mod combatlog;
+mod crawl;
 mod lua;
 mod update;
 use addon::AddonRelease;
@@ -204,6 +205,10 @@ struct Settings {
     /// Per combat log file, the byte offset read up to with the last successful upload.
     #[serde(default)]
     combat_log_offsets: HashMap<String, u64>,
+    /// Per client cache file (`DBCache.bin`, `questcache.wdb`), the SHA-256 uploaded last for
+    /// the crawl (see `crawl`), so an unchanged cache is not sent again.
+    #[serde(default)]
+    crawl_upload_hash: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -381,6 +386,8 @@ struct AppState {
     /// Accounts whose last upload failed transiently: when the watcher may try again and
     /// how many attempts failed in a row.
     retry: Mutex<HashMap<String, RetryState>>,
+    /// Per client, the crawler identity and when the crawl list was last asked for.
+    crawl: Mutex<HashMap<String, crawl::ClientCrawl>>,
 }
 
 #[derive(Clone, Copy)]
@@ -447,6 +454,7 @@ impl AppState {
             unarchived: Mutex::new(HashSet::new()),
             uploading: Mutex::new(HashSet::new()),
             retry: Mutex::new(HashMap::new()),
+            crawl: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2638,6 +2646,7 @@ pub fn run() {
             }
             tauri::async_runtime::spawn(watch_and_upload(app.handle().clone()));
             tauri::async_runtime::spawn(watch_releases(app.handle().clone()));
+            tauri::async_runtime::spawn(crawl::watch(app.handle().clone()));
             Ok(())
         })
         .on_window_event(|window, event| {

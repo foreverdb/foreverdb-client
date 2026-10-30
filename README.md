@@ -29,7 +29,7 @@ The window follows the order in which things have to happen:
 
 The "Activity" list below the cards shows what the background watcher did during this session.
 
-Environment overrides: `FOREVERDB_WOW_DIR`, `FOREVERDB_INGRESS_URL`, `FOREVERDB_ADDON_REPO`.
+Environment overrides: `FOREVERDB_WOW_DIR`, `FOREVERDB_INGRESS_URL`, `FOREVERDB_API_URL`, `FOREVERDB_ADDON_REPO`.
 
 ## Automatic upload
 
@@ -56,6 +56,15 @@ WoW writes the SavedVariables only on logout, on `/reload` and on exit. The app 
 Addons get no combat data: inside dungeons and raids the game hides the GUIDs of hostile units, so ForeverCollect cannot tell which creatures an encounter's bosses are, and casts of creatures are hidden everywhere. The game's combat log file still has both; the addon turns logging on in instances, or everywhere with `/fc combatlog everywhere`. With every upload the app reads the new lines of `<flavour>/Logs/WoWCombatLog*.txt` and sends, as the snapshot's top-level `combatLog` (ForeverCollect `SCHEMA.md` section 15), per successful encounter the creatures that died during the fight (`kills`), and once per client version, creature and spell the spells that hostile or neutral creatures used (`abilities`, with the event kinds they were seen with; no counts). The catalogs stay as the addon wrote them; the server matches each entry to the catalog of its client version. Only encounter, creature and spell IDs, creature names and times are sent; no player names and no raw log lines.
 
 The read position per log file is kept in `settings.json` (`combat_log_offsets`) and only moves after a successful upload, so nothing is sent twice and a failed upload sends the kills again. An encounter still in progress is read with the next upload. The archive keeps the sent kills and abilities next to the snapshot as `<name>.combatlog.json`. The log files themselves are never changed or deleted. The setting "Boss kills and abilities from the combat log" (on by default) turns it off.
+
+## Crawling the server's caches
+
+Items the Forever client carries encrypted, and the texts of quests, are only known to the game server; it answers a client that asks into `Cache/ADB/<locale>/DBCache.bin` and `Cache/WDB/<locale>/questcache.wdb`. An admin can make an uploader that is linked to an account a crawler (ForeverDB backoffice, uploader page). For such an uploader the app, every 15 minutes and whenever the build changes:
+
+- asks the API what is still missing for the Forever client's build (`GET /v1/forever/crawl?build=`; any user of the client that is a crawler) and writes it into the local addon `_forever_/Interface/AddOns/ForeverCollect_CacheIDs` (`ItemIDs.lua`, `QuestIDs.lua`), where ForeverCollect's `/fc itemcache` and `/fc questcache` read it. WoW reads addon files only at login or `/reload`.
+- once the game is closed, uploads the client's `DBCache.bin` and `questcache.wdb` of that build (every locale) when their content changed since the last upload (`POST /imports/client-cache`; hashes in `settings.json` as `crawl_upload_hash`).
+
+The next import merges every crawler's caches, so the list gets shorter. Uploaders that are no crawler get no list and send no caches; nothing changes for them.
 
 ## Tray and autostart
 

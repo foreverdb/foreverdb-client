@@ -101,7 +101,7 @@ type Activity = {
   client: string;
   /** Key of the account folder the event is about. */
   account: string | null;
-  kind: "pending" | "uploaded" | "cleaned" | "processing" | "completed" | "failed" | "error" | "update";
+  kind: "pending" | "uploaded" | "cleaned" | "processing" | "completed" | "failed" | "error" | "update" | "crawl";
   message: string;
   result: UploadResult | null;
   import: ImportStatus | null;
