@@ -7,8 +7,10 @@ use serde::Serialize;
 
 const DEFAULT_REPO: &str = "foreverdb/foreverdb-client";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Where a new version is downloaded: the platform list on the uploader page.
-pub const DOWNLOAD_URL: &str = "https://www.foreverdb.app/en/info/uploader#download-platforms";
+/// Where a new version is downloaded: the platform list on the uploader page, tagged for the
+/// site's analytics (the system browser opens it without a referrer).
+pub const DOWNLOAD_URL: &str =
+    "https://www.foreverdb.app/en/info/uploader?utm_source=foreverdb-client#download-platforms";
 
 pub fn repository() -> String {
     std::env::var("FOREVERDB_UPLOADER_REPO")

@@ -45,6 +45,16 @@ const IMPORT_NOTICE_SECONDS = 10;
 // English texts with a 24-hour clock and day-first dates.
 const LOCALE = "en-GB";
 const SITE_URL = "https://www.foreverdb.app/en";
+
+/**
+ * A page of the website, tagged for its analytics: the system browser opens it without a
+ * referrer, so without `utm_source` the visit would count as direct. The tag goes before a `#`.
+ */
+function siteUrl(path: string) {
+  const [page, hash] = path.split("#", 2);
+  const separator = page.includes("?") ? "&" : "?";
+  return `${SITE_URL}${page}${separator}utm_source=foreverdb-client${hash === undefined ? "" : `#${hash}`}`;
+}
 const FOREVER_PRODUCTS = ["wowf", "wow_classic_beta"];
 
 function clock(unixSeconds: number) {
@@ -153,7 +163,7 @@ function Icon({ path, size = 16, className }: { path: string; size?: number; cla
 /** A link that opens a page of the ForeverDB website. */
 function SiteLink({ path, className, children }: { path: string; className?: string; children: ReactNode }) {
   return (
-    <button className={className ?? "link"} onClick={() => void openUrl(`${SITE_URL}${path}`)}>
+    <button className={className ?? "link"} onClick={() => void openUrl(siteUrl(path))}>
       {children}<Icon path={ICONS.external} size={12} />
     </button>
   );
