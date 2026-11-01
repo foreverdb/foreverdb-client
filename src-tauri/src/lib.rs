@@ -1900,6 +1900,8 @@ struct UploaderUpdate {
     current: String,
     latest: UploaderRelease,
     available: bool,
+    /// Whether this build installs the update itself, see `update::can_self_update`.
+    self_update: bool,
 }
 
 #[tauri::command]
@@ -1913,8 +1915,52 @@ async fn check_uploader_update(
     result.map(|latest| UploaderUpdate {
         current: update::CURRENT_VERSION.to_string(),
         available: latest.is_update(),
+        self_update: update::can_self_update(),
         latest,
     })
+}
+
+/// Installs the latest uploader release and restarts; returns only on failure.
+#[tauri::command]
+async fn install_uploader_update(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let release = latest_uploader_release(&state, false).await?;
+    if !release.is_update() {
+        return Err(format!(
+            "v{} is already installed.",
+            update::CURRENT_VERSION
+        ));
+    }
+    update::install(&app, &release.version).await
+}
+
+/// The tray's update entry: installs where the build can, otherwise opens the download page.
+fn install_uploader_update_from_tray(app: &AppHandle) {
+    if !update::can_self_update() {
+        let _ = app.opener().open_url(update::DOWNLOAD_URL, None::<&str>);
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let result = match latest_uploader_release(&state, false).await {
+            Ok(release) => update::install(&app, &release.version).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            emit_activity(
+                &app,
+                "",
+                None,
+                "error",
+                format!("Uploader update: {error}"),
+                None,
+            );
+            notify(&app, "Uploader update failed", &error);
+        }
+    });
 }
 
 #[derive(Serialize)]
@@ -2009,8 +2055,13 @@ fn announce_updates(
                     app,
                     &format!("ForeverDB Uploader v{} is available", release.version),
                     &format!(
-                        "Installed: v{}. Download it from the tray menu or the uploader window.",
-                        update::CURRENT_VERSION
+                        "Installed: v{}. {} it from the tray menu or the uploader window.",
+                        update::CURRENT_VERSION,
+                        if update::can_self_update() {
+                            "Install"
+                        } else {
+                            "Download"
+                        }
                     ),
                 );
                 let version = release.version.clone();
@@ -2488,11 +2539,20 @@ fn tray_texts(
     uploader: Option<&Result<UploaderRelease, String>>,
     addon: Option<&Result<AddonRelease, String>>,
     outdated: bool,
+    self_update: bool,
 ) -> ((String, bool), (String, bool)) {
     let current = update::CURRENT_VERSION;
     let uploader = match uploader {
         Some(Ok(release)) if release.is_update() => (
-            format!("Uploader v{} available – download …", release.version),
+            format!(
+                "Uploader v{} available – {} …",
+                release.version,
+                if self_update {
+                    "install and restart"
+                } else {
+                    "download"
+                }
+            ),
             true,
         ),
         Some(Ok(_)) => (format!("Uploader v{current} – up to date"), false),
@@ -2536,8 +2596,12 @@ fn refresh_tray(app: &AppHandle) {
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .is_some_and(|release| !outdated_clients(&state.snapshot(), release).is_empty());
-    let ((uploader_text, uploader_enabled), (addon_text, addon_enabled)) =
-        tray_texts(uploader.as_ref(), addon.as_ref(), outdated);
+    let ((uploader_text, uploader_enabled), (addon_text, addon_enabled)) = tray_texts(
+        uploader.as_ref(),
+        addon.as_ref(),
+        outdated,
+        update::can_self_update(),
+    );
     let _ = menu.uploader.set_text(uploader_text);
     let _ = menu.uploader.set_enabled(uploader_enabled);
     let _ = menu.addon.set_text(addon_text);
@@ -2547,7 +2611,7 @@ fn refresh_tray(app: &AppHandle) {
 /// Tray icon with "Show", the update state of uploader and addon, "Check for updates" and
 /// "Quit"; a left click shows the window as well.
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let ((uploader_text, _), (addon_text, _)) = tray_texts(None, None, false);
+    let ((uploader_text, _), (addon_text, _)) = tray_texts(None, None, false, false);
     let show = MenuItem::with_id(app, "show", "Show ForeverDB Uploader", true, None::<&str>)?;
     let uploader = MenuItem::with_id(app, "uploader_update", uploader_text, false, None::<&str>)?;
     let addon = MenuItem::with_id(app, "addon_update", addon_text, false, None::<&str>)?;
@@ -2579,9 +2643,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
             // Only enabled while an update is available.
-            "uploader_update" => {
-                let _ = app.opener().open_url(update::DOWNLOAD_URL, None::<&str>);
-            }
+            "uploader_update" => install_uploader_update_from_tray(app),
             // The addon is installed per client, which the window offers.
             "addon_update" => show_main_window(app),
             "check_updates" => {
@@ -2625,6 +2687,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let config_dir = app.path().app_config_dir().ok();
             let data_dir = app.path().app_data_dir().ok();
@@ -2675,6 +2738,7 @@ pub fn run() {
             link_account,
             check_addon_update,
             check_uploader_update,
+            install_uploader_update,
             install_addon
         ])
         .run(tauri::generate_context!())
@@ -3301,20 +3365,31 @@ mod tests {
             asset_url: String::new(),
         };
 
-        let ((uploader, uploader_enabled), (addon_text, addon_enabled)) =
-            tray_texts(Some(&Ok(newer)), Some(&Ok(addon.clone())), true);
+        let ((uploader, uploader_enabled), (addon_text, addon_enabled)) = tray_texts(
+            Some(&Ok(newer.clone())),
+            Some(&Ok(addon.clone())),
+            true,
+            false,
+        );
         assert_eq!(uploader, "Uploader v999.0.0 available – download …");
         assert!(uploader_enabled);
         assert_eq!(addon_text, "ForeverCollect v0.6 available – install …");
         assert!(addon_enabled);
 
+        let ((uploader, _), _) = tray_texts(Some(&Ok(newer)), None, false, true);
+        assert_eq!(
+            uploader,
+            "Uploader v999.0.0 available – install and restart …"
+        );
+
         let ((uploader, uploader_enabled), (addon_text, addon_enabled)) =
-            tray_texts(Some(&Ok(current)), Some(&Ok(addon)), false);
+            tray_texts(Some(&Ok(current)), Some(&Ok(addon)), false, false);
         assert!(uploader.ends_with("up to date") && !uploader_enabled);
         assert_eq!(addon_text, "ForeverCollect v0.6 – up to date");
         assert!(!addon_enabled);
 
-        let ((uploader, _), (addon_text, _)) = tray_texts(Some(&Err("x".into())), None, false);
+        let ((uploader, _), (addon_text, _)) =
+            tray_texts(Some(&Err("x".into())), None, false, false);
         assert!(uploader.ends_with("update check failed"));
         assert_eq!(addon_text, "ForeverCollect – not checked yet");
     }

@@ -1,6 +1,6 @@
 [package]
 name = "foreverdb-uploader"
-version = "0.7.0"
+version = "0.8.0"
 description = "Uploads ForeverCollect SavedVariables from World of Warcraft: Forever and Classic Hardcore to ForeverDB"
 authors = ["Alex Bangert"]
 license = "MIT"
@@ -38,6 +38,8 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 # Desktop notifications for new uploader and addon releases.
 tauri-plugin-notification = "2"
+# Installs new releases in place (Windows installer, AppImage).
+tauri-plugin-updater = "2"
 
 # Windows only: canonical paths, the launcher's registry entries, process list.
 [target.'cfg(target_os = "windows")'.dependencies]

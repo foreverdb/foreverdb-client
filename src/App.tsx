@@ -100,7 +100,8 @@ function accountBadge(account: AccountStatus): { tone: "success" | "warning" | "
 }
 
 type AddonRelease = { version: string; name: string; notes: string; published_at: string; html_url: string; asset_name: string; asset_size: number };
-type UploaderUpdate = { current: string; latest: { version: string; published_at: string }; available: boolean };
+type UploaderUpdate = { current: string; latest: { version: string; published_at: string }; available: boolean; self_update: boolean };
+type UpdateProgress = { downloaded: number; total: number | null };
 type InstallResult = { version: string; addon_dir: string; running: boolean };
 type ClientCandidate = { id: string; label: string; product: string; version: string | null; has_data: boolean };
 type Installation = { wow_dir: string | null; installations: string[]; searched: string[]; clients: ClientStatus[] };
@@ -196,6 +197,8 @@ function App() {
   const [version, setVersion] = useState("");
   // Outcome of a check by hand in the footer: "" (none), "checking" or the message to show.
   const [uploaderCheck, setUploaderCheck] = useState("");
+  const [uploaderInstall, setUploaderInstall] = useState<UpdateProgress | null>(null);
+  const [installError, setInstallError] = useState("");
   // Addon installation, per client id.
   const [installing, setInstalling] = useState<string | null>(null);
   const [installed, setInstalled] = useState<Record<string, InstallResult>>({});
@@ -280,6 +283,24 @@ function App() {
     // The background check reports its failures in the activity list.
     checkUploader(false).catch(() => undefined);
   }, [checkUploader]);
+
+  useEffect(() => {
+    const unlisten = listen<UpdateProgress>("uploader-update-progress", (event) => setUploaderInstall(event.payload));
+    return () => void unlisten.then((stop) => stop());
+  }, []);
+
+  async function installUploaderUpdate() {
+    setInstallError("");
+    setUploaderInstall({ downloaded: 0, total: null });
+    try {
+      // Restarts the uploader on success.
+      await invoke("install_uploader_update");
+    } catch (message) {
+      setInstallError(String(message));
+    } finally {
+      setUploaderInstall(null);
+    }
+  }
 
   async function checkUploaderByHand() {
     setUploaderCheck("checking");
@@ -693,7 +714,18 @@ function App() {
         <div className="update-banner">
           <strong>ForeverDB Uploader v{uploaderUpdate.latest.version} is available</strong>
           <span>Installed: v{uploaderUpdate.current}</span>
-          <SiteLink path="/info/uploader#download-platforms">Download</SiteLink>
+          {uploaderUpdate.self_update ? (
+            <button className="link" onClick={() => void installUploaderUpdate()} disabled={uploaderInstall !== null}>
+              {uploaderInstall === null
+                ? "Install update"
+                : uploaderInstall.total
+                  ? `Downloading ${Math.round((uploaderInstall.downloaded / uploaderInstall.total) * 100)} %`
+                  : "Downloading …"}
+            </button>
+          ) : (
+            <SiteLink path="/info/uploader#download-platforms">Download</SiteLink>
+          )}
+          {installError && <span className="error-text">{installError}</span>}
         </div>
       )}
 
