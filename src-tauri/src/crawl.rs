@@ -15,8 +15,8 @@ use serde::Deserialize;
 use tauri::AppHandle;
 
 use crate::{
-    active_clients, api_url, content_hash, emit_activity, gzip, target_url, tokio_sleep, AppState,
-    ClientStatus, CLIENT_TAG, CONNECT_TIMEOUT, CONTENT_HASH_HEADER, USER_HEADER,
+    active_clients, api_url, content_hash, emit_activity, gzip, notify, target_url, tokio_sleep,
+    AppState, ClientStatus, CLIENT_TAG, CONNECT_TIMEOUT, CONTENT_HASH_HEADER, USER_HEADER,
 };
 use tauri::Manager;
 
@@ -49,6 +49,29 @@ pub(crate) struct ClientCrawl {
     build: Option<u32>,
     crawler: Option<String>,
     checked: Option<Instant>,
+}
+
+/// The newest DB2 hotfix push of the product the worker found on wago.tools.
+#[derive(Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HotfixPush {
+    pub build: u32,
+    pub push_id: u32,
+}
+
+#[derive(Deserialize, Debug, PartialEq)]
+struct HotfixAnswer {
+    push: Option<HotfixPush>,
+}
+
+/// Whether a push needs a notification and whether to remember it. The first push the app
+/// learns of is only remembered, so a new crawler is not greeted with an old hotfix.
+pub(crate) fn hotfix_notice(notified: Option<u32>, push_id: u32) -> Option<bool> {
+    match notified {
+        None => Some(false),
+        Some(known) if push_id > known => Some(true),
+        Some(_) => None,
+    }
 }
 
 enum Answer {
@@ -211,6 +234,56 @@ async fn fetch_list(user_id: &str, build: u32) -> Result<Answer, String> {
     }
 }
 
+async fn fetch_hotfix(user_id: &str) -> Result<Option<HotfixPush>, String> {
+    let response = http_client(REQUEST_TIMEOUT)?
+        .get(format!(
+            "{}/v1/{CONTEXT}/crawl/hotfix",
+            api_url().trim_end_matches('/')
+        ))
+        .header("X-ForeverDB-Client", CLIENT_TAG)
+        .header(USER_HEADER, user_id)
+        .send()
+        .await
+        .map_err(|e| format!("Could not fetch the latest hotfix: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("The hotfix check answered {}.", response.status()));
+    }
+    response
+        .json::<HotfixAnswer>()
+        .await
+        .map(|answer| answer.push)
+        .map_err(|e| format!("Could not read the latest hotfix: {e}"))
+}
+
+/// Tells the crawler once per hotfix push that the game has new records to ask the server for.
+async fn check_hotfix(app: &AppHandle, state: &AppState, user: &str) {
+    let push = match fetch_hotfix(user).await {
+        Ok(Some(push)) => push,
+        Ok(None) => return,
+        Err(error) => {
+            emit_activity(app, "", None, "error", error, None);
+            return;
+        }
+    };
+    let Some(show) = hotfix_notice(state.snapshot().notified_hotfix_push, push.push_id) else {
+        return;
+    };
+    state.update(|settings| settings.notified_hotfix_push = Some(push.push_id));
+    if !show {
+        return;
+    }
+    let message = format!(
+        "New hotfix for Forever build {}: log in and run /fc itemcache and /fc questcache.",
+        push.build
+    );
+    emit_activity(app, "", None, "crawl", message, None);
+    notify(
+        app,
+        &format!("New hotfix for Forever build {}", push.build),
+        "Log in and run /fc itemcache and /fc questcache, then close the game.",
+    );
+}
+
 async fn upload_cache(
     user_id: &str,
     build: u32,
@@ -320,6 +393,9 @@ pub(crate) async fn watch_client(app: &AppHandle, state: &AppState, client: &Cli
                 }
             }
         }
+        if let Some(user) = &crawler {
+            check_hotfix(app, state, user).await;
+        }
         state.crawl.lock().unwrap().insert(
             client.id.clone(),
             ClientCrawl {
@@ -419,6 +495,31 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_first_hotfix_is_remembered_and_only_newer_ones_are_notified() {
+        assert_eq!(hotfix_notice(None, 17058516), Some(false));
+        assert_eq!(hotfix_notice(Some(17056256), 17058516), Some(true));
+        assert_eq!(hotfix_notice(Some(17058516), 17058516), None);
+        assert_eq!(hotfix_notice(Some(17058516), 17056256), None);
+    }
+
+    #[test]
+    fn the_hotfix_answer_has_the_format_the_api_sends() {
+        let answer: HotfixAnswer = serde_json::from_str(
+            r#"{"push":{"build":70707,"pushId":17058516,"pushedAt":"2026-10-31T18:02:11.000Z"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            answer.push,
+            Some(HotfixPush {
+                build: 70707,
+                push_id: 17058516
+            })
+        );
+        let none: HotfixAnswer = serde_json::from_str(r#"{"push":null}"#).unwrap();
+        assert_eq!(none.push, None);
     }
 
     #[test]

@@ -198,6 +198,9 @@ struct Settings {
     notified_uploader_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notified_addon_version: Option<String>,
+    /// The newest wago.tools hotfix push a crawler was notified about (see `crawl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified_hotfix_push: Option<u32>,
     /// Adds the creatures that died during boss kills from the game's combat log to each
     /// upload (see `combatlog`).
     #[serde(default = "default_true")]
@@ -1973,7 +1976,7 @@ async fn check_updates(app: &AppHandle, force: bool) -> Updates {
     updates
 }
 
-fn notify(app: &AppHandle, title: &str, body: &str) {
+pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
