@@ -12,7 +12,7 @@ type AccountStatus = {
   name: string;
   /** The person behind the account; Battle.net licences "<id>#1", "<id>#2" share it. */
   bnet_id: string;
-  characters: string[];
+  characters: CharacterStatus[];
   file_path: string;
   file_exists: boolean;
   file_has_data: boolean;
@@ -84,9 +84,36 @@ function unsavedHours(client: ClientStatus) {
 }
 
 /** "Character-Realm" split into name and realm; realms may contain dashes, names do not. */
-function splitCharacter(character: string) {
-  const at = character.indexOf("-");
-  return at < 0 ? { name: character, realm: "" } : { name: character.slice(0, at), realm: character.slice(at + 1) };
+type CharacterUpload = { uploaded_at: number; private: boolean; bank: boolean; recipes: boolean; crafts: boolean };
+type CharacterStatus = { name: string; upload: CharacterUpload | null };
+
+function splitCharacter(character: CharacterStatus) {
+  const at = character.name.indexOf("-");
+  const name = at < 0 ? character.name : character.name.slice(0, at);
+  return { name, realm: at < 0 ? "" : character.name.slice(at + 1), upload: character.upload };
+}
+
+/** "Uploaded today", "Uploaded yesterday" or "Uploaded 14 days ago". */
+function uploadedAgo(unixSeconds: number) {
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(unixSeconds * 1000).setHours(0, 0, 0, 0)) / 86_400_000);
+  if (days <= 0) return "Uploaded today";
+  if (days === 1) return "Uploaded yesterday";
+  return `Uploaded ${days} days ago`;
+}
+
+/** What a character's last upload lacked that can be fixed in game. */
+function CharacterGaps({ upload }: { upload: CharacterUpload }) {
+  if (!upload.private) {
+    return (
+      <p className="character-gap">Bags, bank and recipes: not allowed yet <span className="fix">·</span> <code className="command">/fc private on</code></p>
+    );
+  }
+  return (
+    <>
+      {!upload.bank && <p className="character-gap">Bank never opened <span className="fix">· visit a banker once</span></p>}
+      {upload.crafts && !upload.recipes && <p className="character-gap">Recipes not read <span className="fix">· open the profession window</span></p>}
+    </>
+  );
 }
 
 /** The badge of an account card: what happened to its data last. */
@@ -501,9 +528,15 @@ function App() {
             </div>
             {open ? (
               <div className="account-details">
-                <ul className="chips">
+                <ul className="character-list">
                   {characters.map((character) => (
-                    <li key={`${character.name}-${character.realm}`}><strong>{character.name}</strong>{character.realm && <span>{character.realm}</span>}</li>
+                    <li key={`${character.name}-${character.realm}`}>
+                      <div className="character-main">
+                        <p><strong>{character.name}</strong>{character.realm && <span>{character.realm}</span>}</p>
+                        {character.upload && <CharacterGaps upload={character.upload} />}
+                      </div>
+                      {character.upload && <span className="character-uploaded">{uploadedAgo(character.upload.uploaded_at)}</span>}
+                    </li>
                   ))}
                 </ul>
                 <div className="callout">

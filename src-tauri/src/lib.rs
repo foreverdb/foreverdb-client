@@ -86,9 +86,9 @@ struct AccountStatus {
     name: String,
     /// The user the account belongs to, see `AccountDir::bnet_id`.
     bnet_id: String,
-    /// "Character-Realm" of the first character folders, so people sharing an
-    /// installation recognise their account.
-    characters: Vec<String>,
+    /// The first character folders, so people sharing an installation recognise their
+    /// account, with what their last upload carried.
+    characters: Vec<CharacterStatus>,
     /// The file that would be uploaded: the SavedVariables file, or the game's .bak
     /// of it when the current file is an emptied database.
     file_path: String,
@@ -106,6 +106,72 @@ struct AccountStatus {
     uploader_id: Option<String>,
     /// The ForeverDB account this user's uploader ID was linked to, for display.
     linked_account: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+struct CharacterStatus {
+    /// "Character-Realm".
+    name: String,
+    /// The newest upload that carried this character's Armory snapshot.
+    upload: Option<CharacterUpload>,
+}
+
+/// What an upload carried for a character with Armory (`characters` of a catalog), so the
+/// window can tell what is missing and how to fix it in game.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct CharacterUpload {
+    uploaded_at: u64,
+    /// The snapshot held the private part (`/fc private on`).
+    private: bool,
+    /// The private part held a bank scan.
+    bank: bool,
+    /// The private part held the known recipes of at least one profession.
+    recipes: bool,
+    /// The character has a profession with a recipe window (see `crafts`); without one
+    /// there are no recipes to read.
+    #[serde(default)]
+    crafts: bool,
+}
+
+/// Skill lines without a recipe window: Herbalism, Skinning, Fishing.
+const GATHERING_SKILL_LINES: [u64; 3] = [182, 393, 356];
+
+/// Classic Era names its skill lines only in the client's language (enUS, deDE), weapon
+/// skills and languages included; these are the ones with a recipe window.
+const CRAFTING_PROFESSION_NAMES: [&str; 18] = [
+    "Alchemy",
+    "Blacksmithing",
+    "Enchanting",
+    "Engineering",
+    "Leatherworking",
+    "Tailoring",
+    "Mining",
+    "Cooking",
+    "First Aid",
+    "Alchimie",
+    "Schmiedekunst",
+    "Verzauberkunst",
+    "Ingenieurskunst",
+    "Lederverarbeitung",
+    "Schneiderei",
+    "Bergbau",
+    "Kochkunst",
+    "Erste Hilfe",
+];
+
+/// Whether a character snapshot lists a profession with a recipe window: on Forever every
+/// profession with a skill line ID but the gathering ones, on Classic Era the known names.
+fn crafts(snapshot: &serde_json::Value) -> bool {
+    let professions = snapshot.get("professions").and_then(|list| list.as_array());
+    professions.into_iter().flatten().any(|profession| {
+        match profession.get("skillLineID").and_then(|id| id.as_u64()) {
+            Some(id) => !GATHERING_SKILL_LINES.contains(&id),
+            None => profession
+                .get("name")
+                .and_then(|name| name.as_str())
+                .is_some_and(|name| CRAFTING_PROFESSION_NAMES.contains(&name)),
+        }
+    })
 }
 
 #[derive(Serialize)]
@@ -206,6 +272,10 @@ struct Settings {
     /// the crawl (see `crawl`), so an unchanged cache is not sent again.
     #[serde(default)]
     crawl_upload_hash: HashMap<String, String>,
+    /// Per account folder and character (`character_key`), what the newest upload carrying
+    /// its Armory snapshot held.
+    #[serde(default)]
+    character_uploads: HashMap<String, HashMap<String, CharacterUpload>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -871,6 +941,93 @@ fn accounts(client_dir: &Path) -> Vec<AccountDir> {
 
 const CHARACTER_HINTS: usize = 6;
 
+/// Matches a character folder ("Character-Realm") with a snapshot's name and realm: the
+/// folder may drop the realm's spaces.
+fn character_key(name: &str, realm: &str) -> String {
+    format!("{name}-{realm}")
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The characters with an Armory snapshot in an uploaded ForeverCollectDB, by
+/// `character_key`. A character in several catalogs counts with its newest snapshot.
+fn uploaded_characters(snapshot: &serde_json::Value, now: u64) -> HashMap<String, CharacterUpload> {
+    let mut newest: HashMap<String, (f64, CharacterUpload)> = HashMap::new();
+    let catalogs = snapshot
+        .get("catalogs")
+        .and_then(|catalogs| catalogs.as_object());
+    let characters = catalogs
+        .into_iter()
+        .flat_map(|catalogs| catalogs.values())
+        .filter_map(|catalog| catalog.get("characters")?.as_object())
+        .flat_map(|characters| characters.values());
+    for entry in characters {
+        let character = entry.get("character");
+        let field = |name: &str| character.and_then(|c| c.get(name)?.as_str());
+        let (Some(name), Some(realm)) = (field("name"), field("realm")) else {
+            continue;
+        };
+        let captured_at = entry
+            .get("capturedAt")
+            .and_then(|at| at.as_f64())
+            .unwrap_or(0.0);
+        let private = entry.get("private").filter(|private| private.is_object());
+        let upload = CharacterUpload {
+            uploaded_at: now,
+            private: private.is_some(),
+            bank: private.is_some_and(|private| private.get("bank").is_some()),
+            recipes: private
+                .and_then(|private| private.get("recipes")?.as_object())
+                .is_some_and(|recipes| !recipes.is_empty()),
+            crafts: crafts(entry),
+        };
+        let key = character_key(name, realm);
+        if newest.get(&key).is_none_or(|(at, _)| captured_at >= *at) {
+            newest.insert(key, (captured_at, upload));
+        }
+    }
+    newest
+        .into_iter()
+        .map(|(key, (_, upload))| (key, upload))
+        .collect()
+}
+
+/// Every character that observed something in an uploaded ForeverCollectDB: merchants,
+/// trainers and quests carry the observing character (`character` with name and realm).
+fn observing_characters(value: &serde_json::Value, found: &mut HashSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let character = map.get("character");
+            let field = |name: &str| character.and_then(|c| c.get(name)?.as_str());
+            if let (Some(name), Some(realm)) = (field("name"), field("realm")) {
+                found.insert(character_key(name, realm));
+            }
+            map.values()
+                .for_each(|value| observing_characters(value, found));
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|value| observing_characters(value, found)),
+        _ => {}
+    }
+}
+
+/// The first character folders of an account with what their last upload carried.
+fn character_statuses(settings: &Settings, account: &AccountDir) -> Vec<CharacterStatus> {
+    let uploads = settings.character_uploads.get(&account.key());
+    account_characters(&account.dir)
+        .into_iter()
+        .map(|name| {
+            let upload = name.split_once('-').and_then(|(character, realm)| {
+                uploads?.get(&character_key(character, realm)).cloned()
+            });
+            CharacterStatus { name, upload }
+        })
+        .collect()
+}
+
 /// "Character-Realm" of the character folders (`<account>/<realm>/<character>`) the game
 /// keeps per account, at most CHARACTER_HINTS of them.
 fn account_characters(account_dir: &Path) -> Vec<String> {
@@ -1143,7 +1300,7 @@ fn account_status(settings: &Settings, account: &AccountDir) -> AccountStatus {
         key: account.key(),
         name: account.name.clone(),
         bnet_id: account.bnet_id.clone(),
-        characters: account_characters(&account.dir),
+        characters: character_statuses(settings, account),
         file_exists: main_path.is_file(),
         file_has_data: source.is_some(),
         from_backup: source.as_ref().is_some_and(|source| source.from_backup),
@@ -1562,6 +1719,23 @@ async fn upload_client(
         .and_then(|json| json.get("id").and_then(|id| id.as_str()).map(str::to_owned));
     state.clear_retry(account_key);
     remember_upload(state, account_key, content_hash, true);
+    let now = unix_seconds(std::time::SystemTime::now()).unwrap_or(0);
+    let characters = uploaded_characters(&snapshot, now);
+    // A character that played without an Armory snapshot has turned Armory off: what its
+    // earlier uploads carried no longer applies.
+    let mut observed = HashSet::new();
+    observing_characters(&snapshot, &mut observed);
+    state.update(|settings| {
+        let account = settings
+            .character_uploads
+            .entry(account_key.to_string())
+            .or_default();
+        account.retain(|key, _| !observed.contains(key) || characters.contains_key(key));
+        account.extend(characters);
+        if account.is_empty() {
+            settings.character_uploads.remove(account_key);
+        }
+    });
     if let Some(positions) = combat_log_positions {
         state.update(|settings| settings.combat_log_offsets.extend(positions));
     }
@@ -3313,6 +3487,70 @@ mod tests {
         assert_eq!(account_characters(&found[2].dir), vec!["Dipling-Strokkur"]);
         assert!(accounts(&root.join("missing")).is_empty());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reads_uploaded_characters_and_their_gaps() {
+        let snapshot = serde_json::json!({
+            "catalogs": {
+                "old": { "characters": {
+                    "Player-1": { "capturedAt": 10, "character": { "name": "Strokkur", "realm": "Wild Growth" },
+                        "private": { "bank": { "2589": 20 }, "recipes": { "164": { "spellIDs": [2660] } } } },
+                } },
+                "new": { "characters": {
+                    "Player-1": { "capturedAt": 20, "character": { "name": "Strokkur", "realm": "Wild Growth" },
+                        "professions": [{ "name": "Herbalism", "skillLineID": 182 }],
+                        "private": { "recipes": {} } },
+                    "Player-2": { "capturedAt": 5, "character": { "name": "Vizh", "realm": "Lucifron" },
+                        "professions": [{ "name": "Schwert" }, { "name": "Schneiderei" }] },
+                } },
+                "empty": {},
+            }
+        });
+        let found = uploaded_characters(&snapshot, 99);
+        assert_eq!(found.len(), 2);
+        // the newest snapshot of a character counts
+        assert_eq!(
+            found["strokkur-wildgrowth"],
+            CharacterUpload {
+                uploaded_at: 99,
+                private: true,
+                bank: false,
+                recipes: false,
+                crafts: false
+            }
+        );
+        assert_eq!(
+            found["vizh-lucifron"],
+            CharacterUpload {
+                uploaded_at: 99,
+                private: false,
+                bank: false,
+                recipes: false,
+                crafts: true
+            }
+        );
+        assert_eq!(
+            character_key("Strokkur", "Wild Growth"),
+            character_key("Strokkur", "WildGrowth")
+        );
+
+        // merchants, trainers and quests name the observing character, Armory or not
+        let observations = serde_json::json!({
+            "catalogs": { "k": {
+                "merchants": { "1": { "snapshots": [{ "character": { "name": "Dipling", "realm": "Strokkur" } }] } },
+                "characters": { "Player-1": { "character": { "name": "Strokkur", "realm": "Wild Growth" } } },
+            } }
+        });
+        let mut observed = HashSet::new();
+        observing_characters(&observations, &mut observed);
+        assert_eq!(
+            observed,
+            HashSet::from([
+                "dipling-strokkur".to_string(),
+                "strokkur-wildgrowth".to_string()
+            ])
+        );
     }
 
     #[test]
