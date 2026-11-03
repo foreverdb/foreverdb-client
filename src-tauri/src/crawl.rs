@@ -86,13 +86,15 @@ pub(crate) fn build_number(version: &str) -> Option<u32> {
 }
 
 /// One data file of the addon, in the format foreverdb-import writes: the sorted ids, 20 per
-/// line, in a global table ForeverCollect reads from another addon.
+/// line, in a global table ForeverCollect reads from another addon. `.build` names the build
+/// the list is for, so ForeverCollect can tell a list of the previous build after an update.
 pub(crate) fn id_list_lua(key: &str, ids: &[u32], build: u32) -> String {
     let mut sorted = ids.to_vec();
     sorted.sort_unstable();
     let mut out = format!(
         "-- written by the ForeverDB uploader from the crawl list of build {build}; do not edit\n\
-         ForeverCollectCacheIDs = ForeverCollectCacheIDs or {{}}\n\nForeverCollectCacheIDs.{key} = {{\n"
+         ForeverCollectCacheIDs = ForeverCollectCacheIDs or {{}}\n\
+         ForeverCollectCacheIDs.build = {build}\n\nForeverCollectCacheIDs.{key} = {{\n"
     );
     for chunk in sorted.chunks(20) {
         let line: Vec<String> = chunk.iter().map(u32::to_string).collect();
@@ -139,6 +141,32 @@ pub(crate) fn write_list(client_dir: &Path, list: &CrawlList) -> std::io::Result
         changed = true;
     }
     Ok(changed)
+}
+
+/// Removes the addon from the client's AddOns folder; returns whether there was one. Only
+/// approved crawlers may have it: ForeverCollect shows the crawl commands while it is there.
+pub(crate) fn remove_list(client_dir: &Path) -> std::io::Result<bool> {
+    let dir = client_dir.join("Interface").join("AddOns").join(ADDON);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// How the API answered one identity of a client during a refresh.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Reply {
+    List,
+    NoCrawler,
+    NotImported,
+    Error,
+}
+
+/// Whether a refresh says the client has no crawler anymore: every identity asked was turned
+/// down (403). A build not imported yet or an error says nothing about the approval.
+fn approval_revoked(replies: &[Reply]) -> bool {
+    !replies.is_empty() && replies.iter().all(|reply| *reply == Reply::NoCrawler)
 }
 
 /// A client cache file worth uploading.
@@ -366,20 +394,24 @@ pub(crate) async fn watch_client(app: &AppHandle, state: &AppState, client: &Cli
             .collect();
         users.sort();
         users.dedup();
+        let mut replies = Vec::new();
         for user in users {
             match fetch_list(&user, build).await {
                 Ok(Answer::List(list)) => {
+                    replies.push(Reply::List);
                     crawler = Some(user);
                     write_crawl_list(app, client, &list);
                     break;
                 }
-                Ok(Answer::NoCrawler) => {}
+                Ok(Answer::NoCrawler) => replies.push(Reply::NoCrawler),
                 Ok(Answer::NotImported) => {
                     // the server has no catalog of the build yet; ask again with the next round
+                    replies.push(Reply::NotImported);
                     crawler = Some(user);
                     break;
                 }
                 Err(error) => {
+                    replies.push(Reply::Error);
                     // reported once per refresh, not with every round of the watcher
                     emit_activity(
                         app,
@@ -392,6 +424,9 @@ pub(crate) async fn watch_client(app: &AppHandle, state: &AppState, client: &Cli
                     break;
                 }
             }
+        }
+        if crawler.is_none() && approval_revoked(&replies) {
+            remove_crawl_list(app, client);
         }
         if let Some(user) = &crawler {
             check_hotfix(app, state, user).await;
@@ -449,6 +484,33 @@ pub(crate) async fn watch_client(app: &AppHandle, state: &AppState, client: &Cli
                 None,
             ),
         }
+    }
+}
+
+/// Removes the addon of a client whose crawler approval is gone, also while WoW runs: the
+/// addon disappears with the next /reload or login.
+fn remove_crawl_list(app: &AppHandle, client: &ClientStatus) {
+    match remove_list(Path::new(&client.id)) {
+        Ok(false) => {}
+        Ok(true) => emit_activity(
+            app,
+            &client.id,
+            None,
+            "crawl",
+            format!(
+                "{}: crawl list removed (not a crawler anymore).",
+                client.label
+            ),
+            None,
+        ),
+        Err(error) => emit_activity(
+            app,
+            &client.id,
+            None,
+            "error",
+            format!("{}: could not remove the crawl list: {error}", client.label),
+            None,
+        ),
     }
 }
 
@@ -534,10 +596,41 @@ mod tests {
         let ids: Vec<u32> = (1..=21).rev().collect();
         let lua = id_list_lua("items", &ids, 70707);
         assert!(lua.contains("ForeverCollectCacheIDs = ForeverCollectCacheIDs or {}\n"));
+        assert!(lua.contains("ForeverCollectCacheIDs.build = 70707\n"));
         assert!(lua.contains(
             "ForeverCollectCacheIDs.items = {\n    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,\n    21,\n}\n"
         ));
         assert!(toc(16001).starts_with("## Interface: 16001\n"));
+    }
+
+    #[test]
+    fn removing_the_list_deletes_the_addon_folder() {
+        let dir = temp_dir("remove");
+        let list = CrawlList {
+            build: 70707,
+            interface_version: 16001,
+            items: vec![1],
+            quests: vec![2],
+        };
+        write_list(&dir, &list).unwrap();
+        assert!(remove_list(&dir).unwrap());
+        assert!(!dir.join("Interface/AddOns").join(ADDON).exists());
+        // nothing left to remove
+        assert!(!remove_list(&dir).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_refusal_of_every_identity_revokes_the_approval() {
+        assert!(approval_revoked(&[Reply::NoCrawler]));
+        assert!(approval_revoked(&[Reply::NoCrawler, Reply::NoCrawler]));
+        // a build not imported yet or an error leaves the addon alone
+        assert!(!approval_revoked(&[Reply::NoCrawler, Reply::NotImported]));
+        assert!(!approval_revoked(&[Reply::NoCrawler, Reply::Error]));
+        assert!(!approval_revoked(&[Reply::Error]));
+        assert!(!approval_revoked(&[Reply::List]));
+        // a client without accounts asked nobody
+        assert!(!approval_revoked(&[]));
     }
 
     #[test]
