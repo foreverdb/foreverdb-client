@@ -192,12 +192,6 @@ struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     legacy_linked_account: Option<String>,
-    /// The newest uploader and addon versions a desktop notification was shown for, so
-    /// each release is notified once and not on every start.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    notified_uploader_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    notified_addon_version: Option<String>,
     /// The newest wago.tools hotfix push a crawler was notified about (see `crawl`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notified_hotfix_push: Option<u32>,
@@ -2027,16 +2021,15 @@ pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
 }
 
 /// Reports new releases to the window (once per session) and as a desktop notification
-/// (once per version, remembered in the settings). A check by hand reports everything,
-/// including that nothing is new.
+/// (on every check that finds one, until it is installed). A check by hand reports
+/// everything, including that nothing is new.
 fn announce_updates(
     app: &AppHandle,
     updates: &Updates,
     by_hand: bool,
     announced: &mut HashSet<String>,
 ) {
-    let state = app.state::<AppState>();
-    let settings = state.snapshot();
+    let settings = app.state::<AppState>().snapshot();
     let mut news = false;
 
     match &updates.uploader {
@@ -2050,23 +2043,19 @@ fn announce_updates(
             if by_hand || announced.insert(format!("uploader {}", release.version)) {
                 emit_activity(app, "", None, "update", message, None);
             }
-            if by_hand || settings.notified_uploader_version.as_ref() != Some(&release.version) {
-                notify(
-                    app,
-                    &format!("ForeverDB Uploader v{} is available", release.version),
-                    &format!(
-                        "Installed: v{}. {} it from the tray menu or the uploader window.",
-                        update::CURRENT_VERSION,
-                        if update::can_self_update() {
-                            "Install"
-                        } else {
-                            "Download"
-                        }
-                    ),
-                );
-                let version = release.version.clone();
-                state.update(|settings| settings.notified_uploader_version = Some(version));
-            }
+            notify(
+                app,
+                &format!("ForeverDB Uploader v{} is available", release.version),
+                &format!(
+                    "Installed: v{}. {} it from the tray menu or the uploader window.",
+                    update::CURRENT_VERSION,
+                    if update::can_self_update() {
+                        "Install"
+                    } else {
+                        "Download"
+                    }
+                ),
+            );
         }
         Ok(_) => {}
         Err(error) => emit_activity(
@@ -2092,18 +2081,14 @@ fn announce_updates(
                 if by_hand || announced.insert(format!("addon {}", release.version)) {
                     emit_activity(app, "", None, "update", message, None);
                 }
-                if by_hand || settings.notified_addon_version.as_ref() != Some(&release.version) {
-                    notify(
-                        app,
-                        &format!("ForeverCollect v{} is available", release.version),
-                        &format!(
-                            "Outdated in: {}. Install it in the ForeverDB Uploader.",
-                            outdated.join(", ")
-                        ),
-                    );
-                    let version = release.version.clone();
-                    state.update(|settings| settings.notified_addon_version = Some(version));
-                }
+                notify(
+                    app,
+                    &format!("ForeverCollect v{} is available", release.version),
+                    &format!(
+                        "Outdated in: {}. Install it in the ForeverDB Uploader.",
+                        outdated.join(", ")
+                    ),
+                );
             }
         }
         Err(error) => emit_activity(
