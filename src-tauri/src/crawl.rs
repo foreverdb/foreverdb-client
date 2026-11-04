@@ -65,11 +65,13 @@ struct HotfixAnswer {
 }
 
 /// Whether a push needs a notification and whether to remember it. The first push the app
-/// learns of is only remembered, so a new crawler is not greeted with an old hotfix.
+/// learns of is only remembered, so a new crawler is not greeted with an old hotfix. Any other
+/// ID counts as new: the server only ever answers its newest real push, and older apps may have
+/// remembered an ID of 2^24 + record ID, which is higher than every real push.
 pub(crate) fn hotfix_notice(notified: Option<u32>, push_id: u32) -> Option<bool> {
     match notified {
         None => Some(false),
-        Some(known) if push_id > known => Some(true),
+        Some(known) if push_id != known => Some(true),
         Some(_) => None,
     }
 }
@@ -560,24 +562,28 @@ mod tests {
     }
 
     #[test]
-    fn the_first_hotfix_is_remembered_and_only_newer_ones_are_notified() {
-        assert_eq!(hotfix_notice(None, 17058516), Some(false));
-        assert_eq!(hotfix_notice(Some(17056256), 17058516), Some(true));
-        assert_eq!(hotfix_notice(Some(17058516), 17058516), None);
-        assert_eq!(hotfix_notice(Some(17058516), 17056256), None);
+    fn the_first_hotfix_is_remembered_and_only_other_ones_are_notified() {
+        assert_eq!(hotfix_notice(None, 113605), Some(false));
+        assert_eq!(hotfix_notice(Some(113604), 113605), Some(true));
+        assert_eq!(hotfix_notice(Some(113605), 113605), None);
+    }
+
+    #[test]
+    fn a_real_push_is_notified_after_a_remembered_record_id() {
+        assert_eq!(hotfix_notice(Some(17057520), 113605), Some(true));
     }
 
     #[test]
     fn the_hotfix_answer_has_the_format_the_api_sends() {
         let answer: HotfixAnswer = serde_json::from_str(
-            r#"{"push":{"build":70707,"pushId":17058516,"pushedAt":"2026-10-31T18:02:11.000Z"}}"#,
+            r#"{"push":{"build":70707,"pushId":113605,"pushedAt":"2026-10-31T18:02:11.000Z"}}"#,
         )
         .unwrap();
         assert_eq!(
             answer.push,
             Some(HotfixPush {
                 build: 70707,
-                push_id: 17058516
+                push_id: 113605
             })
         );
         let none: HotfixAnswer = serde_json::from_str(r#"{"push":null}"#).unwrap();
