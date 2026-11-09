@@ -1,0 +1,17 @@
+{
+  "name": "@foreverdb/forevercollect-lua",
+  "version": "0.0.0",
+  "description": "The ForeverCollect SavedVariables parser of the ForeverDB uploader as WASM",
+  "license": "MIT",
+  "type": "module",
+  "main": "forevercollect_lua_wasm.js",
+  "module": "forevercollect_lua_wasm.js",
+  "types": "forevercollect_lua_wasm.d.ts",
+  "files": [
+    "forevercollect_lua_wasm.js",
+    "forevercollect_lua_wasm.d.ts",
+    "forevercollect_lua_wasm_bg.wasm",
+    "forevercollect_lua_wasm_bg.wasm.d.ts"
+  ],
+  "sideEffects": false
+}

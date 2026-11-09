@@ -78,13 +78,32 @@ The next import merges every crawler's caches, so the list gets shorter. Uploade
 
 ## Upload format
 
-The uploader converts the SavedVariables to JSON itself and uploads only that (`Content-Type: application/json`, `Content-Encoding: gzip`); the server no longer parses Lua. The parser reads the dump as data and never executes it. It lives in its own crate, `crates/forevercollect-lua` (`cargo test` there runs its tests and the golden fixture), so the website can run the same code as WASM.
+The uploader converts the SavedVariables to JSON itself and uploads only that (`Content-Type: application/json`, `Content-Encoding: gzip`); the server no longer parses Lua. The parser reads the dump as data and never executes it. It lives in its own crate, `crates/forevercollect-lua`, so the website can run the same code as WASM (see "Parser as WASM"). `cargo test --workspace` in `crates/` runs its tests and the golden fixture.
 
 **Rejected before upload:** If a file cannot be read or carries an unsupported `schemaVersion` (typically an outdated addon), the app reports it before uploading, leaves the file in place and still archives it.
 
 **Rejected by the server:** The same applies when the server rejects the snapshot permanently (4xx except 408/429). The content is marked as handled so the watcher does not resend it every 3 s.
 
 **What the archive keeps:** The archive keeps the raw `.lua`, not the JSON. Since the server no longer stores the original file, it is the only remaining source for reproducing a parser bug. The file name carries the import ID, so it can still be matched to `import_jobs.id`.
+
+## Parser as WASM
+
+The website's browser upload runs the same parser. `crates/` is a small Cargo workspace (its own `Cargo.lock` and `target/`; `src-tauri` is not a member):
+
+- `forevercollect-lua`: the parser.
+- `forevercollect-lua-wasm`: a single function, `parse(source: Uint8Array): string`. It returns the snapshot as JSON text, ready to be gzipped and uploaded, and throws an `Error` with the parser's message.
+
+**What a release attaches:** Every release attaches `foreverdb-forevercollect-lua-<version>.tgz`, the npm package `@foreverdb/forevercollect-lua` (wasm-bindgen `--target web`). The website installs it from the release URL. Before the app is built, the release workflow builds the package and checks it in Node against the golden fixture. If that fails, nothing is released.
+
+**Building locally:**
+
+1. `rustup target add wasm32-unknown-unknown`
+2. `cargo install wasm-bindgen-cli --version 0.2.130 --locked`
+3. `crates/forevercollect-lua-wasm/pack.sh [version]`
+
+The tarball lands in `crates/forevercollect-lua-wasm/dist/`.
+
+**Bumping wasm-bindgen:** `wasm-bindgen` is pinned in `crates/forevercollect-lua-wasm/Cargo.toml`, and the CLI must have exactly that version. Bump it there, in the `wasm` job of `.github/workflows/release.yml` and in this section together.
 
 ## Updates
 

@@ -58,8 +58,41 @@ jobs:
             exit 1
           fi
 
-  build:
+  # The parser as WASM for the website's browser upload (npm tarball, attached to the
+  # release by attach-wasm). Runs first: a failing golden test stops the release.
+  wasm:
     needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # Must match the wasm-bindgen version pinned in crates/forevercollect-lua-wasm/Cargo.toml.
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+
+      - name: Build, test and pack
+        run: crates/forevercollect-lua-wasm/pack.sh "${{ needs.prepare.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forevercollect-lua
+          path: crates/forevercollect-lua-wasm/dist/*.tgz
+          if-no-files-found: error
+
+  build:
+    needs: [prepare, wasm]
     strategy:
       fail-fast: false
       matrix:
@@ -105,8 +138,8 @@ jobs:
 
       # The SavedVariables parser is a path dependency; `cargo test` in src-tauri does not run its tests.
       - name: Test parser
-        working-directory: crates/forevercollect-lua
-        run: cargo test
+        working-directory: crates
+        run: cargo test --workspace
 
       # Signs the updater artifacts (NSIS installer, AppImage) and attaches latest.json,
       # which the running uploaders install from.
@@ -122,3 +155,20 @@ jobs:
           releaseBody: See the assets below to download and install ForeverDB Uploader v__VERSION__.
           releaseDraft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
+
+  # tauri-action created the release (draft or not) in the build jobs; add the parser tarball.
+  attach-wasm:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: forevercollect-lua
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v${{ needs.prepare.outputs.version }}" \
+            "foreverdb-forevercollect-lua-${{ needs.prepare.outputs.version }}.tgz" \
+            --repo "$GITHUB_REPOSITORY"

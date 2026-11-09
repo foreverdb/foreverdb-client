@@ -1,0 +1,12 @@
+# The SavedVariables parser and its WASM build for the website. src-tauri is not a member:
+# it keeps its own Cargo.lock and target/ and uses forevercollect-lua as a path dependency.
+[workspace]
+members = ["forevercollect-lua", "forevercollect-lua-wasm"]
+resolver = "2"
+
+# The same as the app; "s" keeps the WASM small.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
