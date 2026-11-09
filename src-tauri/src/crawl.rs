@@ -532,15 +532,16 @@ fn write_crawl_list(app: &AppHandle, client: &ClientStatus, list: &CrawlList) {
             None,
             "crawl",
             format!(
-                "{}: crawl list of build {} written ({} items, {} quests).{}",
+                "{}: crawl list of build {} written ({} items, {} quests, {} spells).{}",
                 client.label,
                 list.build,
                 list.items.len(),
                 list.quests.len(),
+                list.spells.len(),
                 if client.running {
-                    " WoW is running: /reload, then /fc itemcache and /fc questcache."
+                    " WoW is running: /reload, then /fc itemcache, /fc questcache and /fc spelltooltips."
                 } else {
-                    " In the game: /fc itemcache and /fc questcache, then log out."
+                    " In the game: /fc itemcache, /fc questcache and /fc spelltooltips, then log out."
                 }
             ),
             None,
