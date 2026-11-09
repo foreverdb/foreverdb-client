@@ -93,13 +93,19 @@ The website's browser upload runs the same parser. `crates/` is a small Cargo wo
 - `forevercollect-lua`: the parser.
 - `forevercollect-lua-wasm`: a single function, `parse(source: Uint8Array): string`. It returns the snapshot as JSON text, ready to be gzipped and uploaded, and throws an `Error` with the parser's message.
 
-**What a release attaches:** Every release attaches `foreverdb-forevercollect-lua-<version>.tgz`, the npm package `@foreverdb/forevercollect-lua` (wasm-bindgen `--target web`). The website installs it from the release URL. Before the app is built, the release workflow builds the package and checks it in Node against the golden fixture. If that fails, nothing is released.
+**What a release attaches:** Every release attaches `foreverdb-forevercollect-lua-<parser version>.tgz`, the npm package `@foreverdb/forevercollect-lua` (wasm-bindgen `--target web`). The website installs it from the release URL. Before the app is built, the release workflow builds the package and checks it in Node against the golden fixture. If that fails, nothing is released.
+
+**Parser version:** The package carries the parser's own version, the `version` in `crates/forevercollect-lua/Cargo.toml`, not the uploader's.
+
+- Uploader releases that leave the parser alone attach the same version again. The website keeps its URL, and the URL of a published release stays valid.
+- When the parser changes, bump that version. The website then switches to the release that contains it.
+- The browser upload reports itself as `web/<parser version>`, so `import_jobs.source` names the parser that converted the file.
 
 **Building locally:**
 
 1. `rustup target add wasm32-unknown-unknown`
 2. `cargo install wasm-bindgen-cli --version 0.2.130 --locked`
-3. `crates/forevercollect-lua-wasm/pack.sh [version]`
+3. `crates/forevercollect-lua-wasm/pack.sh`
 
 The tarball lands in `crates/forevercollect-lua-wasm/dist/`.
 

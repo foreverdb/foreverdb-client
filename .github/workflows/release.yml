@@ -83,7 +83,8 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
 
       - name: Build, test and pack
-        run: crates/forevercollect-lua-wasm/pack.sh "${{ needs.prepare.outputs.version }}"
+        # The package carries the parser's version (crates/forevercollect-lua/Cargo.toml).
+        run: crates/forevercollect-lua-wasm/pack.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -170,5 +171,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "v${{ needs.prepare.outputs.version }}" \
-            "foreverdb-forevercollect-lua-${{ needs.prepare.outputs.version }}.tgz" \
+            foreverdb-forevercollect-lua-*.tgz \
             --repo "$GITHUB_REPOSITORY"
