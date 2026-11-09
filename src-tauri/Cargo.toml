@@ -25,6 +25,8 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The SavedVariables parser, shared with the website (crates/forevercollect-lua).
+forevercollect-lua = { path = "../crates/forevercollect-lua" }
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tauri-plugin-dialog = "2"

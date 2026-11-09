@@ -18,7 +18,7 @@ use tauri_plugin_opener::OpenerExt;
 mod addon;
 mod combatlog;
 mod crawl;
-mod lua;
+use forevercollect_lua as lua;
 mod update;
 use addon::AddonRelease;
 use update::UploaderRelease;

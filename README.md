@@ -78,7 +78,7 @@ The next import merges every crawler's caches, so the list gets shorter. Uploade
 
 ## Upload format
 
-The uploader converts the SavedVariables to JSON itself and uploads only that (`Content-Type: application/json`, `Content-Encoding: gzip`); the server no longer parses Lua. The parser reads the dump as data and never executes it.
+The uploader converts the SavedVariables to JSON itself and uploads only that (`Content-Type: application/json`, `Content-Encoding: gzip`); the server no longer parses Lua. The parser reads the dump as data and never executes it. It lives in its own crate, `crates/forevercollect-lua` (`cargo test` there runs its tests and the golden fixture), so the website can run the same code as WASM.
 
 **Rejected before upload:** If a file cannot be read or carries an unsupported `schemaVersion` (typically an outdated addon), the app reports it before uploading, leaves the file in place and still archives it.
 

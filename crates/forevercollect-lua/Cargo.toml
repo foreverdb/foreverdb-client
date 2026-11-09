@@ -1,0 +1,11 @@
+[package]
+name = "forevercollect-lua"
+version = "0.1.0"
+description = "Converts the ForeverCollect SavedVariables to JSON without running Lua"
+authors = ["Alex Bangert"]
+license = "MIT"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde_json = "1"

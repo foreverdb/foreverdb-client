@@ -103,6 +103,11 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # The SavedVariables parser is a path dependency; `cargo test` in src-tauri does not run its tests.
+      - name: Test parser
+        working-directory: crates/forevercollect-lua
+        run: cargo test
+
       # Signs the updater artifacts (NSIS installer, AppImage) and attaches latest.json,
       # which the running uploaders install from.
       - uses: tauri-apps/tauri-action@v0
