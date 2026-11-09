@@ -27,6 +27,7 @@ const CONTEXT: &str = "forever";
 pub(crate) const ADDON: &str = "ForeverCollect_CacheIDs";
 const QUEST_FILE: &str = "QuestIDs.lua";
 const ITEM_FILE: &str = "ItemIDs.lua";
+const SPELL_FILE: &str = "SpellIDs.lua";
 /// How often the crawler check and the list are refreshed; an import shortens the list.
 const LIST_REFRESH: Duration = Duration::from_secs(15 * 60);
 /// How often the watcher looks at the crawl state.
@@ -41,6 +42,8 @@ pub(crate) struct CrawlList {
     pub interface_version: u32,
     pub items: Vec<u32>,
     pub quests: Vec<u32>,
+    /// Spells whose values only a tooltip scan in game shows (`/fc spelltooltips`).
+    pub spells: Vec<u32>,
 }
 
 /// What the watcher knows about a client: which identity crawls for it and when it asked.
@@ -110,9 +113,9 @@ pub(crate) fn toc(interface_version: u32) -> String {
     format!(
         "## Interface: {interface_version}\n\
          ## Title: ForeverCollect cache IDs\n\
-         ## Notes: ID lists for /fc questcache and /fc itemcache, written by the ForeverDB uploader for crawlers.\n\
+         ## Notes: ID lists for /fc questcache, /fc itemcache and /fc spelltooltips, written by the ForeverDB uploader for crawlers.\n\
          ## RequiredDeps: ForeverCollect\n\n\
-         {QUEST_FILE}\n{ITEM_FILE}\n"
+         {QUEST_FILE}\n{ITEM_FILE}\n{SPELL_FILE}\n"
     )
 }
 
@@ -129,6 +132,10 @@ pub(crate) fn write_list(client_dir: &Path, list: &CrawlList) -> std::io::Result
         (
             ITEM_FILE.to_string(),
             id_list_lua("items", &list.items, list.build),
+        ),
+        (
+            SPELL_FILE.to_string(),
+            id_list_lua("spells", &list.spells, list.build),
         ),
     ];
     let mut changed = false;
@@ -607,6 +614,7 @@ mod tests {
             "ForeverCollectCacheIDs.items = {\n    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,\n    21,\n}\n"
         ));
         assert!(toc(16001).starts_with("## Interface: 16001\n"));
+        assert!(toc(16001).ends_with("QuestIDs.lua\nItemIDs.lua\nSpellIDs.lua\n"));
     }
 
     #[test]
@@ -617,6 +625,7 @@ mod tests {
             interface_version: 16001,
             items: vec![1],
             quests: vec![2],
+            spells: vec![],
         };
         write_list(&dir, &list).unwrap();
         assert!(remove_list(&dir).unwrap());
@@ -647,12 +656,16 @@ mod tests {
             interface_version: 16001,
             items: vec![3, 1],
             quests: vec![9],
+            spells: vec![1265831],
         };
         assert!(write_list(&dir, &list).unwrap());
         assert!(!write_list(&dir, &list).unwrap());
         let items =
             fs::read_to_string(dir.join("Interface/AddOns").join(ADDON).join(ITEM_FILE)).unwrap();
         assert!(items.contains("    1, 3,\n"));
+        let spells =
+            fs::read_to_string(dir.join("Interface/AddOns").join(ADDON).join(SPELL_FILE)).unwrap();
+        assert!(spells.contains("ForeverCollectCacheIDs.spells = {\n    1265831,\n}\n"));
         let _ = fs::remove_dir_all(&dir);
     }
 
